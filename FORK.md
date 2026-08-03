@@ -1,9 +1,9 @@
 # This fork
 
-A fork of [Vexa-ai/vexa](https://github.com/Vexa-ai/vexa) for the Jana Aickova meeting-capture
-pilot. It exists for one reason: the pilot runs Vexa **capture-only** (the bot records, transcription
-happens afterwards against Azure OpenAI), and two upstream defects make that configuration
-unreachable on the auto-join path. Both are fixed in-tree here and offered upstream.
+A fork of [Vexa-ai/vexa](https://github.com/Vexa-ai/vexa) for an internal meeting-capture pilot. It
+exists for one reason: the pilot runs Vexa **capture-only** (the bot records, transcription happens
+afterwards against Azure OpenAI), and two upstream defects make that configuration unreachable on
+the auto-join path. Both are fixed in-tree here.
 
 Fork point: `1f6898c` (upstream `main`, PR #987).
 
@@ -32,8 +32,9 @@ on every container recreation. A fork is what makes them survive.
 
 `jana-pilot` is the integration branch carrying both, and is what the pilot deploys.
 
-Both branches are offered upstream as separate PRs. If they land, this fork's reason to exist
-narrows to the pin.
+The two fixes are kept on **separate branches off an unmodified upstream `main`**, each standing on
+its own, so either can be offered upstream as a clean PR later without untangling it from the other
+or from the pin. No upstream PR is open at present - this is a private-use fork for now.
 
 ## Deliberately NOT fixed here: upstream #866
 

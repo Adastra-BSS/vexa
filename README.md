@@ -1,5 +1,5 @@
-> **This is a fork.** It carries two capture-only auto-join fixes and a pinned image for the Jana
-> Aickova meeting-capture pilot, and deliberately leaves upstream #866 to that pilot's supervisor.
+> **This is a fork.** It carries two capture-only auto-join fixes and a pinned image for an internal
+> meeting-capture pilot, and deliberately leaves upstream #866 to that pilot's supervisor.
 > See **[FORK.md](FORK.md)**. Everything below is upstream's README.
 
 <div align="center">
