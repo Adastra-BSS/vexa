@@ -16,9 +16,12 @@ and refuses a due row whose room is already covered by a DIFFERENT row — stamp
 correct however the two rows came to exist (live 2026-08-17: a manual "Send bot now" row plus a
 calendar import of the same Meet that failed to adopt it).
 
-Failures are LOUD, never silent (P18/P10): a cap/quota rejection or spawn failure stamps
-``data.auto_join_error`` (+ ``data.auto_join_next_retry`` backoff so one bad row doesn't re-fire
-every tick) — the terminal surfaces it on the meeting row.
+Failures are LOUD, never silent (P18/P10): EVERY way a spawn can refuse — cap/quota rejection,
+spawn failure, a config refusal, or an unexpected error — stamps ``data.auto_join_error``
+(+ ``data.auto_join_next_retry`` backoff so one bad row doesn't re-fire every tick), and the sweep
+moves to the next row. The terminal surfaces the stamp on the meeting row. A row is never left
+``scheduled`` with nothing written on it, and no single row's failure aborts the tick for the rows
+behind it.
 
 Every dispatch also stamps ``data.auto_join_last_attempt`` BEFORE it is made. That records the
 attempt rather than its outcome, so it outlives outcomes this row never gets to write: a spawn
@@ -52,7 +55,15 @@ from ..service_authority import (
     ServiceAuthorityUnavailable,
 )
 from .env_flags import resolve_spawn_flag
-from .ports import MaxBotsExceeded, MeetingStopped, QuotaExceeded, SpawnFailed
+from .ports import (
+    AuthSessionBusy,
+    AuthSessionNotConfigured,
+    MaxBotsExceeded,
+    MeetingStopped,
+    QuotaExceeded,
+    SpawnFailed,
+    TranscriptionNotConfigured,
+)
 from .service import DuplicateMeeting, request_bot
 
 # Sweep cadence/window env vocabulary (config.v1: all optional, sane defaults).
@@ -358,6 +369,17 @@ async def auto_join_tick(
             continue
         except SpawnFailed as e:
             await _stamp_error(row, str(e) or "bot workload failed to start")
+            continue
+        except (TranscriptionNotConfigured, AuthSessionNotConfigured, AuthSessionBusy) as e:
+            # The spawn flow's config refusals. POST /bots turns each into a status code the caller
+            # reads; a sweep has no caller, so the row itself carries the reason.
+            await _stamp_error(row, str(e) or type(e).__name__)
+            continue
+        except Exception as e:  # noqa: BLE001
+            # One row's surprise must not cost every LATER due row in this tick its bot, and must
+            # not leave the row `scheduled` with nothing written on it. Stamp it where an operator
+            # will read it, then carry on with the sweep.
+            await _stamp_error(row, f"{type(e).__name__}: {e}")
             continue
         counters["spawned"] += 1
         if data.get("auto_join_error"):

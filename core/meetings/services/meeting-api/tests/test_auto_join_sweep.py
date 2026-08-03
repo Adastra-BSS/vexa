@@ -223,6 +223,71 @@ async def test_spawn_success_clears_stale_error_stamp():
     assert "auto_join_error" not in repo._meetings[mid]["data"]
 
 
+async def test_transcription_refusal_stamps_the_row_and_the_tick_survives():
+    """``request_bot``'s config refusals (``TranscriptionNotConfigured`` and the authenticated-bot
+    gates) are none of the sweep's four handled types, so they used to escape ``auto_join_tick``:
+    the row stayed ``scheduled`` with NO error stamped — invisible in the terminal, retried every
+    tick forever — and every later due row in the same tick lost its bot to the aborted sweep.
+
+    Observed live on a capture-only deployment: scheduled rows stuck with no error anywhere."""
+    from meeting_api.bot_spawn import service as spawn_service
+    from meeting_api.bot_spawn.ports import TranscriptionNotConfigured
+
+    repo, runtime = InMemoryMeetingRepo(), FakeRuntimeClient()
+    doomed = _seed(repo, mid=1, native="doomed-row")
+    healthy = _seed(repo, mid=2, native="healthy-row")
+
+    real_request_bot = spawn_service.request_bot
+
+    async def refusing_request_bot(*a, **kw):
+        if kw.get("native_meeting_id") == "doomed-row":
+            raise TranscriptionNotConfigured("no transcription backend configured")
+        return await real_request_bot(*a, **kw)
+
+    import meeting_api.bot_spawn.auto_join as aj
+    orig = aj.request_bot
+    aj.request_bot = refusing_request_bot
+    try:
+        counters = await _tick(repo, runtime)
+    finally:
+        aj.request_bot = orig
+
+    assert counters["errors"] == 1
+    data = repo._meetings[doomed]["data"]
+    assert "transcription backend" in data["auto_join_error"]
+    assert "auto_join_next_retry" in data           # backoff, not a re-fire every tick
+    assert repo._meetings[doomed]["status"] == "scheduled"
+    # …and the tick did NOT abort: the other due row still got its bot.
+    assert counters["spawned"] == 1
+    assert repo._meetings[healthy]["status"] == "requested"
+
+
+async def test_unexpected_spawn_error_stamps_the_row_and_the_tick_survives():
+    """The catch-all: no single row's surprise may cost every other meeting in the tick its bot.
+    An unhandled type is still stamped loudly on the row it belongs to."""
+    repo, runtime = InMemoryMeetingRepo(), FakeRuntimeClient()
+    doomed = _seed(repo, mid=1, native="doomed-row")
+    healthy = _seed(repo, mid=2, native="healthy-row")
+
+    import meeting_api.bot_spawn.auto_join as aj
+    real = aj.request_bot
+
+    async def exploding_request_bot(*a, **kw):
+        if kw.get("native_meeting_id") == "doomed-row":
+            raise RuntimeError("asyncpg connection reset")
+        return await real(*a, **kw)
+
+    aj.request_bot = exploding_request_bot
+    try:
+        counters = await _tick(repo, runtime)
+    finally:
+        aj.request_bot = real
+
+    assert counters["errors"] == 1 and counters["spawned"] == 1
+    assert "asyncpg connection reset" in repo._meetings[doomed]["data"]["auto_join_error"]
+    assert repo._meetings[healthy]["status"] == "requested"
+
+
 async def test_stt_gate_failure_is_loud():
     repo, runtime = InMemoryMeetingRepo(), FakeRuntimeClient()
     mid = _seed(repo)
