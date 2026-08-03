@@ -9,9 +9,12 @@ out of the sweep's predicate, and the per-user advisory lock serializes it again
 manual "Send bot now" (that race surfaces here as ``DuplicateMeeting`` — someone already joined —
 counted, never error-stamped).
 
-Failures are LOUD, never silent (P18/P10): a cap/quota rejection or spawn failure stamps
-``data.auto_join_error`` (+ ``data.auto_join_next_retry`` backoff so one bad row doesn't re-fire
-every tick) — the terminal surfaces it on the meeting row.
+Failures are LOUD, never silent (P18/P10): EVERY way a spawn can refuse — cap/quota rejection,
+spawn failure, a config refusal, or an unexpected error — stamps ``data.auto_join_error``
+(+ ``data.auto_join_next_retry`` backoff so one bad row doesn't re-fire every tick), and the sweep
+moves to the next row. The terminal surfaces the stamp on the meeting row. A row is never left
+``scheduled`` with nothing written on it, and no single row's failure aborts the tick for the rows
+behind it.
 
 ``auto_join`` defaults ON when the key is absent — planning a meeting with a time means the bot
 comes, opting out is the explicit act.
@@ -26,7 +29,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from ..obs import log_event
-from .ports import MaxBotsExceeded, QuotaExceeded, SpawnFailed
+from .ports import (
+    AuthSessionBusy,
+    AuthSessionNotConfigured,
+    MaxBotsExceeded,
+    QuotaExceeded,
+    SpawnFailed,
+    TranscriptionNotConfigured,
+)
 from .service import DuplicateMeeting, request_bot
 
 # Sweep cadence/window env vocabulary (config.v1: all optional, sane defaults).
@@ -202,6 +212,17 @@ async def auto_join_tick(
             continue
         except SpawnFailed as e:
             await _stamp_error(row, str(e) or "bot workload failed to start")
+            continue
+        except (TranscriptionNotConfigured, AuthSessionNotConfigured, AuthSessionBusy) as e:
+            # The spawn flow's config refusals. POST /bots turns each into a status code the caller
+            # reads; a sweep has no caller, so the row itself carries the reason.
+            await _stamp_error(row, str(e) or type(e).__name__)
+            continue
+        except Exception as e:  # noqa: BLE001
+            # One row's surprise must not cost every LATER due row in this tick its bot, and must
+            # not leave the row `scheduled` with nothing written on it. Stamp it where an operator
+            # will read it, then carry on with the sweep.
+            await _stamp_error(row, f"{type(e).__name__}: {e}")
             continue
         counters["spawned"] += 1
         if data.get("auto_join_error"):
