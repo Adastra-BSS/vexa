@@ -151,8 +151,8 @@ async def request_bot(
     language: Optional[str] = None,
     task: Optional[str] = None,
     transcription_tier: str = "realtime",
-    recording_enabled: bool = False,
-    transcribe_enabled: bool = True,
+    recording_enabled: Optional[bool] = None,
+    transcribe_enabled: Optional[bool] = None,
     automatic_leave: Optional[dict] = None,
     continue_meeting: bool = False,
     max_concurrent: Optional[int] = None,
@@ -176,7 +176,20 @@ async def request_bot(
     per-user cap — the spawn is rejected if the user already has that many ACTIVE bots. A cap
     ``<= 0`` means the quota is DEPLETED (every spawn rejected) — 0 is never "unlimited"; ``None``
     means no cap was provided, so no pre-check.
+
+    ``transcribe_enabled`` / ``recording_enabled`` ``None`` means "the caller has no opinion" and
+    resolves to the DEPLOYMENT's flags. This is the only spawn flow, so the deployment's answer must
+    live here rather than in any one caller: POST /bots resolves a request-body value first (and a
+    422 for a non-boolean) and passes the resolved bool down, while the auto-join sweep passes
+    nothing at all. A signature default would silently override ``TRANSCRIBE_ENABLED`` /
+    ``RECORDING_ENABLED`` for every caller that is not the HTTP route.
     """
+    # 0. Deployment flags, for every caller without an explicit opinion.
+    if transcribe_enabled is None:
+        transcribe_enabled = env_flag("TRANSCRIBE_ENABLED", True)
+    if recording_enabled is None:
+        recording_enabled = env_flag("RECORDING_ENABLED", True)
+
     # 1. URL.
     constructed_url = meeting_url or construct_meeting_url(platform, native_meeting_id)
 

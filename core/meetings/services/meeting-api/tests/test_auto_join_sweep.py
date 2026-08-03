@@ -96,6 +96,28 @@ async def test_linkless_row_skipped():
     assert counters["due"] == 0
 
 
+# ---- the deployment's capture flags reach the auto-joined bot ------------------------
+
+async def test_auto_joined_bot_inherits_a_capture_only_deployment(monkeypatch):
+    """A capture-only deployment (``TRANSCRIBE_ENABLED=false``, ``RECORDING_ENABLED=true``) must
+    produce capture-only auto-joined bots. The sweep passes neither flag, so the shared spawn flow
+    has to resolve them from the deployment — otherwise every scheduled row spawns a bot that wants
+    an STT it does not have, and records nothing once that is unblocked."""
+    monkeypatch.setenv("TRANSCRIBE_ENABLED", "false")
+    monkeypatch.setenv("RECORDING_ENABLED", "true")
+    monkeypatch.delenv("TRANSCRIPTION_SERVICE_URL", raising=False)
+    monkeypatch.delenv("ADMIN_API_URL", raising=False)
+
+    repo, runtime = InMemoryMeetingRepo(), FakeRuntimeClient()
+    mid = _seed(repo)
+    counters = await _tick(repo, runtime)
+
+    assert counters["spawned"] == 1 and counters["errors"] == 0
+    data = repo._meetings[mid]["data"]
+    assert data["transcribe_enabled"] is False
+    assert data["recording_enabled"] is True
+
+
 # ---- idempotency --------------------------------------------------------------------
 
 async def test_second_tick_is_a_noop():

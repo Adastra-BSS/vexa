@@ -111,6 +111,45 @@ class TestSpawnFlagCallSites:
         monkeypatch.setenv("TRANSCRIBE_ENABLED", "true")
         assert _resolve_transcribe_enabled(False) is False
 
+    async def test_request_bot_resolves_the_deployment_flags_when_caller_omits_them(
+        self, monkeypatch,
+    ):
+        """``request_bot`` is the shared spawn flow: POST /bots resolves the request value first and
+        passes it down, every other caller passes nothing. "Nothing" must mean the DEPLOYMENT's
+        flags, so a capture-only deployment cannot be overridden by a signature default."""
+        from meeting_api.bot_spawn import request_bot
+        from meeting_api.bot_spawn.fakes import FakeRuntimeClient, InMemoryMeetingRepo
+
+        monkeypatch.setenv("TRANSCRIBE_ENABLED", "false")
+        monkeypatch.setenv("RECORDING_ENABLED", "true")
+        monkeypatch.delenv("ADMIN_API_URL", raising=False)
+
+        repo = InMemoryMeetingRepo()
+        await request_bot(repo, FakeRuntimeClient(), user_id=7, platform="google_meet",
+                          native_meeting_id="dep-flags", redis_url="redis://r", token_secret="s")
+
+        data = next(iter(repo._meetings.values()))["data"]
+        assert data["transcribe_enabled"] is False
+        assert data["recording_enabled"] is True
+
+    @pytest.mark.parametrize("flag", ["transcribe_enabled", "recording_enabled"])
+    async def test_explicit_caller_value_still_beats_the_deployment_flags(self, monkeypatch, flag):
+        from meeting_api.bot_spawn import request_bot
+        from meeting_api.bot_spawn.fakes import FakeRuntimeClient, InMemoryMeetingRepo
+
+        monkeypatch.setenv("TRANSCRIBE_ENABLED", "false")
+        monkeypatch.setenv("RECORDING_ENABLED", "false")
+        monkeypatch.delenv("ADMIN_API_URL", raising=False)
+        # A caller asking for transcription needs a backend to reach, or the STT gate refuses.
+        monkeypatch.setenv("TRANSCRIPTION_SERVICE_URL", "http://stt.local")
+
+        repo = InMemoryMeetingRepo()
+        await request_bot(repo, FakeRuntimeClient(), user_id=7, platform="google_meet",
+                          native_meeting_id=f"explicit-{flag}", redis_url="redis://r",
+                          token_secret="s", **{flag: True})
+
+        assert next(iter(repo._meetings.values()))["data"][flag] is True
+
     def test_empty_env_no_longer_disarms_the_fail_loud_stt_gate(self, monkeypatch):
         """The second half of the witness bug: `"" != "true"` made the gate return None, so the
         503 designed to catch an unconfigured STT never fired. Empty must now reach the gate."""
