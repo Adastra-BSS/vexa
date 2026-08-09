@@ -26,6 +26,11 @@ import {
 // An embedder that records installs its own page.addInitScript BEFORE calling
 // joinMicrosoftTeams — the join layer only enters and observes.
 
+// How long the initial navigation to the Teams page may take. This is a page-load budget, not an
+// admission budget: the bot has not reached the waiting room yet, so the lobby budget the control
+// plane issues (LOBBY_BUDGET_MS) does not cover this window.
+const TEAMS_NAVIGATION_TIMEOUT_MS = 120_000;
+
 async function warmUpTeamsMediaDevices(page: Page): Promise<void> {
   try {
     const result = await page.evaluate(async () => {
@@ -164,8 +169,11 @@ export async function joinMicrosoftTeams(
   botConfig: BotConfig
 ): Promise<void> {
   // Step 1: Navigate to Teams meeting
+  // The navigation budget is deliberately generous: a cold Chromium loading Teams on a loaded
+  // host can exceed 60s, and a goto that times out here kills the bot BEFORE it reaches the
+  // waiting room, so the run is stamped `join_failure` and the lobby budget never applies.
   log(`Step 1: Navigating to Teams meeting: ${meetingUrl}`);
-  await page.goto(meetingUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.goto(meetingUrl, { waitUntil: 'domcontentloaded', timeout: TEAMS_NAVIGATION_TIMEOUT_MS });
   await page.waitForTimeout(500);
 
   // Fix 2: Propagate JOINING callback failure — bot must NOT proceed if server rejected
