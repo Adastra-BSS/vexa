@@ -77,7 +77,9 @@ ARG VALKEY_SHA256=f7e927534aaeb3a5f4410375c3e6f2f0c1b9257db8bc573e68f9e2dbb11344
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" -o /tmp/valkey.tar.gz \
+# --retry rides out GitHub rate-limiting builder egress IPs (429 answers, common from ACR/CI pools);
+# curl backs off exponentially and honors Retry-After, so a limited window heals instead of failing.
+RUN curl -fsSL --retry 8 --retry-max-time 600 "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" -o /tmp/valkey.tar.gz \
  && echo "${VALKEY_SHA256}  /tmp/valkey.tar.gz" | sha256sum -c - \
  && mkdir -p /tmp/valkey && tar -xzf /tmp/valkey.tar.gz -C /tmp/valkey --strip-components=1 \
  && make -C /tmp/valkey -j"$(nproc)" BUILD_TLS=no \
