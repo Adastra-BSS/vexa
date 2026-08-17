@@ -143,10 +143,10 @@ up: preflight
 			-e MINIO_ROOT_USER=$(MINIO_ACCESS_KEY) -e MINIO_ROOT_PASSWORD=$(MINIO_SECRET_KEY) \
 			-v vexa-lite-miniodata:/data \
 			minio/minio:latest server /data --console-address ":9001" > /dev/null; \
-		sleep 4; \
-		docker run --rm --network $(NETWORK) --entrypoint sh minio/mc:latest -c \
-			"mc alias set vexa http://$(MINIO_CONTAINER):9000 $(MINIO_ACCESS_KEY) $(MINIO_SECRET_KEY) && mc mb --ignore-existing vexa/$(MINIO_BUCKET)" >/dev/null 2>&1 || true; \
-	fi; echo "  ✓ MinIO ready"; \
+	fi; \
+	echo "  Ensuring bucket $(MINIO_BUCKET) (waiting for MinIO, up to 120s)..."; \
+	docker run --rm --network $(NETWORK) --entrypoint sh minio/mc:latest -c 'set -e; for i in $$(seq 1 24); do if mc alias set vexa http://$(MINIO_CONTAINER):9000 $(MINIO_ACCESS_KEY) $(MINIO_SECRET_KEY) >/dev/null 2>&1 && mc admin info vexa >/dev/null 2>&1; then break; fi; sleep 5; done; mc alias set vexa http://$(MINIO_CONTAINER):9000 $(MINIO_ACCESS_KEY) $(MINIO_SECRET_KEY) >/dev/null; mc admin info vexa >/dev/null; mc mb --ignore-existing vexa/$(MINIO_BUCKET) >/dev/null; mc stat vexa/$(MINIO_BUCKET) >/dev/null'; \
+	echo "  ✓ MinIO ready — bucket $(MINIO_BUCKET) present"; \
 	if [ -n "$(LOCAL_STT)" ]; then \
 		echo "Starting local CPU STT ($(WHISPER_CONTAINER), $(WHISPER_MODEL))..."; \
 		if ! docker ps -q -f name=$(WHISPER_CONTAINER) | grep -q .; then \
