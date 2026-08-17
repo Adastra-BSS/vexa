@@ -82,7 +82,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL --retry 8 --retry-max-time 600 "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" -o /tmp/valkey.tar.gz \
  && echo "${VALKEY_SHA256}  /tmp/valkey.tar.gz" | sha256sum -c - \
  && mkdir -p /tmp/valkey && tar -xzf /tmp/valkey.tar.gz -C /tmp/valkey --strip-components=1 \
- && make -C /tmp/valkey -j"$(nproc)" BUILD_TLS=no \
+ # OPTIMIZATION=-O2 keeps valkey's Makefile from adding -flto: GCC's lto-wrapper crashes under
+ # qemu-user emulation, so LTO would tie this build to a native amd64 builder for a cache server
+ # that never notices the difference.
+ && make -C /tmp/valkey -j"$(nproc)" BUILD_TLS=no OPTIMIZATION="-O2" \
  && make -C /tmp/valkey install PREFIX=/opt/valkey \
  && cp /tmp/valkey/COPYING /valkey-COPYING \
  && /opt/valkey/bin/valkey-server --version \
