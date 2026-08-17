@@ -208,6 +208,7 @@ class _ProbeServer:
         self.routes = routes
         self.default_status = default_status
         self.paths: list = []
+        self.headers_seen: list = []
         self._server = None
         self._thread = None
 
@@ -220,6 +221,7 @@ class _ProbeServer:
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):  # noqa: N802 — BaseHTTPRequestHandler's interface
                 outer.paths.append(self.path)
+                outer.headers_seen.append({k.lower(): v for k, v in self.headers.items()})
                 self.send_response(outer.routes.get(self.path, outer.default_status))
                 self.end_headers()
 
@@ -257,6 +259,18 @@ def test_probe_url_accepts_both_declared_url_shapes():
     full = f"https://api.openai.com{_STT_PATH}"
     assert cp.probe_url(full, _STT_PATH) == full
     assert cp.probe_url(full + "/", _STT_PATH) == full
+
+
+_AZURE_STT_PATH = ("/openai/deployments/gpt-transcribe/audio/transcriptions"
+                   "?api-version=2025-04-01-preview")
+
+
+def test_probe_url_keeps_an_azure_deployment_url_verbatim():
+    """C4: an Azure deployment URL bakes its own path AND query string into the configured value —
+    appending the declared path after the query string 404s a backend that works in a meeting,
+    which is an invalid_endpoint config fault that refuses every spawn."""
+    azure = f"https://acct.openai.azure.com{_AZURE_STT_PATH}"
+    assert cp.probe_url(azure, _STT_PATH) == azure
 
 
 def test_probe_404_is_misconfigured_not_ok():
@@ -303,6 +317,22 @@ def test_probe_accepts_a_full_path_url_without_double_pathing():
         requested = list(srv.paths)
     assert result["ok"] is True, f"full-path URL must not double-path: requested {requested}"
     assert requested == [_STT_PATH], f"expected exactly one un-doubled request, got {requested}"
+
+
+def test_probe_requests_an_azure_deployment_url_verbatim_with_api_key_auth():
+    """C4: against an Azure deployment URL the probe must ask exactly what a bot's client asks —
+    the configured path plus query string, once, authenticated with ``api-key`` (Azure's key-auth
+    header; a Bearer header only carries AAD tokens, so a key sent as Bearer answers 401)."""
+    with _ProbeServer(routes={_AZURE_STT_PATH: 400}) as srv:
+        env = {"TRANSCRIPTION_SERVICE_URL": srv.base + _AZURE_STT_PATH,
+               "TRANSCRIPTION_SERVICE_TOKEN": "tok"}
+        result = cp._http_probe(_stt_probe_spec()["http"], env, timeout=5)
+        requested = list(srv.paths)
+        headers = list(srv.headers_seen)
+    assert result["ok"] is True, f"azure-shaped URL must probe green: {result}"
+    assert requested == [_AZURE_STT_PATH], f"expected the verbatim azure path once, got {requested}"
+    assert headers[0].get("api-key") == "tok"
+    assert "authorization" not in headers[0], "azure key auth must not ride a Bearer header"
 
 
 # ── C3 (#511): a spawn against a SET-but-BROKEN backend refuses with the probe's reason ─────────

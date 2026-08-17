@@ -213,3 +213,19 @@ def test_transcription_probe_hits_the_transcriptions_path_once():
         assert seen == [("https://api.openai.com/v1/audio/transcriptions", "sk-good")], (
             f"{configured} → {seen}"
         )
+
+
+def test_transcription_azure_deployment_url_is_probed_verbatim():
+    """C4 at this consumer, Azure shape: the deployment URL carries its own path plus query
+    string — the test must hit it exactly as configured, never with the OpenAI path appended."""
+    azure = ("https://acct.openai.azure.com/openai/deployments/gpt-transcribe"
+             "/audio/transcriptions?api-version=2025-04-01-preview")
+    seen = []
+
+    def probe(endpoint, token):
+        seen.append((endpoint, token))
+        return 200, "{}"
+
+    out = ct.run_transcription_test(azure, "azkey", "env", get=_NO_BALANCE, probe=probe)
+    assert out["ok"], f"azure URL must verify green: {out}"
+    assert seen == [(azure, "azkey")], f"expected the verbatim azure endpoint once, got {seen}"

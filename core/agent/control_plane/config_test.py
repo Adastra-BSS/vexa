@@ -158,13 +158,16 @@ def run_models_test(config: dict, env: Optional[dict] = None,
 _STT_PATH = "/v1/audio/transcriptions"
 
 def _transcribe_probe(endpoint: str, token: str) -> tuple:
-    """POST the shared audio probe body — the same request the boot preflight makes."""
-    from control_plane.config_preflight import audio_probe_body
+    """POST the shared audio probe body — the same request the boot preflight makes, auth header
+    included (Azure deployment URLs take ``api-key``, everything else a bearer token)."""
+    from control_plane.config_preflight import audio_probe_body, is_azure_deployment_url
 
     content_type, body = audio_probe_body()
+    auth = {"api-key": token} if is_azure_deployment_url(endpoint) \
+        else {"Authorization": f"Bearer {token}"}
     req = urllib.request.Request(
         endpoint, data=body, method="POST",
-        headers={"Content-Type": content_type, "Authorization": f"Bearer {token}"})
+        headers={"Content-Type": content_type, **auth})
     try:
         with urllib.request.urlopen(req, timeout=_STT_PROBE_TIMEOUT) as r:
             return r.status, r.read().decode("utf-8", "replace")
@@ -184,7 +187,9 @@ def _verify_transcribes(base: str, token: str, source: str, probe: TranscribePro
     account reports 0.0 minutes and transcribes perfectly, so a balance threshold condemns the
     working credential and clears nothing. Sending audio makes the verdict independent of whose
     token it is, so no account identity is named anywhere in this codebase."""
-    endpoint = base if base.endswith(_STT_PATH) else base + _STT_PATH
+    from control_plane.config_preflight import probe_url
+
+    endpoint = probe_url(base, _STT_PATH)
     who = f" ({account})" if account else ""
     try:
         status, body = probe(endpoint, token)

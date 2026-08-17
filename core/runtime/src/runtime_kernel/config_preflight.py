@@ -137,14 +137,26 @@ def _reset_probe_cache() -> None:
     _probe_cache.clear()
 
 
+def is_azure_deployment_url(url: str) -> bool:
+    """Azure OpenAI speaks the same audio API behind a different envelope: the deployment, the
+    endpoint path and the api-version are all baked into the configured URL
+    (``.../openai/deployments/{d}/audio/transcriptions?api-version=...``), and the key rides an
+    ``api-key`` header rather than a bearer token. One predicate, read off the URL's deployment
+    path, switches both — the same flag the bot's client keys on
+    (``whisper/src/transcription-client.ts``)."""
+    return "/openai/deployments/" in (url or "")
+
+
 def probe_url(base: str, path: str) -> str:
-    """Join a configured base URL to the probe's declared path, accepting BOTH accepted shapes:
-    a bare base (``https://api.openai.com``) and a full endpoint URL that already carries the path
-    (``https://api.openai.com/v1/audio/transcriptions``). Appending blindly would double-path the
-    latter into a 404 — the same URL that works in a meeting. This is the ONE rule, shared with the
-    bot's client (``whisper/src/transcription-client.ts``) and the terminal's dictation route."""
+    """Join a configured base URL to the probe's declared path, accepting EVERY accepted shape:
+    a bare base (``https://api.openai.com``), a full endpoint URL that already carries the path
+    (``https://api.openai.com/v1/audio/transcriptions``), and an Azure deployment URL, which
+    carries its own path plus query string. Appending blindly would double-path the non-bare
+    shapes into a 404 — the same URL that works in a meeting. This is the ONE rule, shared with
+    the bot's client (``whisper/src/transcription-client.ts``) and the terminal's dictation
+    route."""
     base = (base or "").strip().rstrip("/")
-    if not path:
+    if not path or is_azure_deployment_url(base):
         return base
     return base if base.endswith(path) else base + path
 
@@ -230,7 +242,10 @@ def _http_probe(spec: dict, env: Mapping[str, str], timeout: float) -> dict:
         req.add_header("Content-Type", content_type)
     token = (env.get(spec["auth_key"]) or "").strip() if spec.get("auth_key") else ""
     if token:
-        req.add_header("Authorization", f"Bearer {token}")
+        if is_azure_deployment_url(url):
+            req.add_header("api-key", token)
+        else:
+            req.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — declared endpoint
             status = int(r.status)
