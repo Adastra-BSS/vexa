@@ -106,6 +106,7 @@ The repo-root `.env` (auto-seeded from `deploy/compose/.env` if present, else mi
 |---|---|---|
 | `TRANSCRIPTION_SERVICE_URL` / `_TOKEN` | — | STT endpoint + key, shared by the bot transcript pipeline and the terminal composer mic (dictation `/api/stt`). Unset → bots capture, no transcript; composer mic returns 503 "not configured" |
 | `TRANSCRIPTION_MODEL` | — | STT model id sent on every request — required by backends that validate it (Groq `whisper-large-v3-turbo`, vLLM's served name). Unset → `whisper-1` |
+| `TRANSCRIPTION_ALLOWED_LANGUAGES` | — | languages the rooms actually speak, comma-separated (`cs,en`) — the backend's multi-language hint, so a bilingual meeting is not pinned to one language per window. Unset → the backend decides alone. Honoured by Azure OpenAI deployment URLs (`…/openai/deployments/<name>/audio/transcriptions?api-version=…`), which the client also authenticates with `api-key` and asks for `json` |
 | `ADMIN_TOKEN` | `changeme` | admin API token (the stack's shared admin secret) |
 | `IMAGE_TAG` | `latest` | the `vexaai/vexa-lite` tag to pull (a local `vexa-lite:dev` build wins) |
 

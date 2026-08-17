@@ -181,20 +181,28 @@ function laneSink(publish: TranscriptSink['publish'], onError?: (e: unknown) => 
  *  absolute_start_time and the dashboard renderer SKIPS every pending draft (it keys on absolute
  *  time), so Teams/Zoom transcripts only appeared after a reload (the REST read re-derives it). */
 /**
- * Labels that name NOBODY, in every spelling the lane produces: the provisional segmentation id,
- * the word the lane publishes it as, and the stable letter a distinct-but-unnamed transport track
- * carries. All three are INTERNAL — they are how the lane talks to itself about a refusal.
+ * Labels that name NOBODY AND DISTINGUISH NOBODY: the provisional segmentation id, and the bare
+ * word the lane publishes a contested turn as. Both are INTERNAL — they are how the lane talks to
+ * itself about a refusal, and neither tells a reader which voice they are reading.
+ *
+ * The lettered label (`Speaker A`, `Speaker B`, …) is deliberately NOT here. It is a refusal to
+ * NAME, but it is not a refusal to SEPARATE: the letter is stable per transport track for the whole
+ * meeting, so a reader following it follows one voice, and a summariser can attribute the turns to
+ * distinct participants. Blanking it merged every unnamed voice into one anonymous run.
  */
-const UNATTRIBUTED_LABEL = /^(?:seg_\d+|Speaker|Speaker [A-Z]+)$/;
+const UNATTRIBUTED_LABEL = /^(?:seg_\d+|Speaker)$/;
 
 /**
- * What a viewer sees when we could not name the speaker: NOTHING.
+ * What a viewer sees when we could not name AND could not separate the speaker: NOTHING.
  *
  * Founder ruling from the rc.3 witness call. A row labelled "Speaker" advertises a failed claim —
  * it is the product telling the customer, in the customer's own transcript, that it tried and
  * missed. A blank simply reads as continuation of the passage. The refusal has not been hidden: the
  * track identity survives in `speaker_key`, and WHY the lane refused lives in the observations
  * sidecar beside the tape. What changes is that the failure stops being addressed to the customer.
+ *
+ * A lettered label carries real information — one stable voice — so it passes through and a late
+ * real name repaints it (retract + republish by `segment_id`) exactly as before.
  *
  * This is the one place the mapping happens. The lane keeps its internal labels, so the replay
  * harness and every score built on it keep counting refusals exactly as before rather than going
@@ -418,6 +426,7 @@ export function createTranscribe(inv: Invocation): Transcribe {
     serviceUrl: inv.transcriptionServiceUrl,
     apiToken: inv.transcriptionServiceToken,
     model: inv.transcriptionModel ?? undefined,
+    allowedLanguages: inv.allowedLanguages,
   });
   const language = inv.language ?? undefined;
   return (pcm, prompt) => client.transcribe(pcm, language, prompt);

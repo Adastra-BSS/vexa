@@ -323,6 +323,12 @@ async def request_bot(
     transcription_service_url = os.getenv("TRANSCRIPTION_SERVICE_URL") or None
     transcription_service_token = os.getenv("TRANSCRIPTION_SERVICE_TOKEN") or None
     transcription_model = os.getenv("TRANSCRIPTION_MODEL") or None
+    # The languages this deployment's rooms actually speak (comma-separated), passed to the backend
+    # as a set it may switch between per window. A deployment knob, not a per-request one: the
+    # caller's `language` still pins one language when it has an opinion.
+    allowed_languages = [
+        lang.strip() for lang in (os.getenv("TRANSCRIPTION_ALLOWED_LANGUAGES") or "").split(",") if lang.strip()
+    ] or None
     bot_context = await _fetch_bot_context(user_id)
     configured = _transcription_from_context(bot_context)
     # O-TEL-1 fixture collection, resolved from the SAME best-effort lookup (one hop, two readers).
@@ -600,6 +606,7 @@ async def request_bot(
         native_meeting_id=native_meeting_id,
         connection_id=connection_id,
         language=language,
+        allowed_languages=allowed_languages,
         task=task,
         transcription_tier=transcription_tier,
         redis_url=redis_url,

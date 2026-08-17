@@ -119,6 +119,16 @@
    ]
   },
   {
+   "key": "TRANSCRIPTION_ALLOWED_LANGUAGES",
+   "class": "defaulted",
+   "default": "(unset — the invocation omits allowedLanguages and the backend decides alone)",
+   "description": "comma-separated languages a bilingual deployment's rooms actually speak (e.g. `cs,en`) — bot_spawn threads them into the invocation as `allowedLanguages`, which the STT client sends as the multi-language hint so the model may switch per window instead of being pinned to one language",
+   "targets": [
+    "compose",
+    "lite"
+   ]
+  },
+  {
    "key": "TRANSCRIBE_ENABLED",
    "class": "defaulted",
    "default": "true",

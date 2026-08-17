@@ -49,6 +49,11 @@ export interface TranscriptionClientConfig {
    *  (Groq, vLLM, gateways) need their served name; the bundled unit ignores it (its model is
    *  the unit's own MODEL_SIZE). Default: "whisper-1". */
   model?: string;
+  /** Languages the backend may choose between for THIS window, as a multi-language hint
+   *  (`languages[]` form parts, Azure mode only). A bilingual meeting must not be pinned to one
+   *  language by the singular `language` part: leave that unset and list every language the room
+   *  actually speaks, so the model may switch per window. */
+  allowedLanguages?: string[];
 }
 
 /** The STT boundary's FAILURE vocabulary (P5 + P18: an adapter must translate the
@@ -102,10 +107,17 @@ export class TranscriptionClient {
   private maxSpeechDurationSec: number | undefined;
   private minSilenceDurationMs: number | undefined;
   private model: string;
+  private allowedLanguages: string[] | undefined;
+  /** Azure OpenAI speaks the same audio API behind a different envelope: the deployment and the
+   *  api-version are baked into the URL, the key rides an `api-key` header rather than a bearer
+   *  token, and the faster-whisper-only knobs (verbose_json, word timestamps, VAD tuning) are not
+   *  served. One flag, read off the URL's deployment path, switches all of it. */
+  private azureMode: boolean;
   constructor(config: TranscriptionClientConfig) {
     // Ensure serviceUrl ends with the transcriptions endpoint
     this.serviceUrl = config.serviceUrl.replace(/\/+$/, '');
-    if (!this.serviceUrl.endsWith('/v1/audio/transcriptions')) {
+    this.azureMode = this.serviceUrl.includes('/openai/deployments/');
+    if (!this.azureMode && !this.serviceUrl.endsWith('/v1/audio/transcriptions')) {
       this.serviceUrl += '/v1/audio/transcriptions';
     }
     this.apiToken = config.apiToken;
@@ -116,6 +128,7 @@ export class TranscriptionClient {
     this.maxSpeechDurationSec = config.maxSpeechDurationSec;
     this.minSilenceDurationMs = config.minSilenceDurationMs;
     this.model = config.model ?? 'whisper-1';
+    this.allowedLanguages = config.allowedLanguages?.length ? config.allowedLanguages : undefined;
   }
 
   /**
@@ -180,11 +193,12 @@ export class TranscriptionClient {
       `${this.model}\r\n`
     ));
 
-    // Response format part
+    // Response format part. Azure's gpt-transcribe serves `json` only — asking it for
+    // verbose_json is a 400, so the segment-shaped response is rebuilt below instead.
     parts.push(Buffer.from(
       `--${boundary}\r\n` +
       `Content-Disposition: form-data; name="response_format"\r\n\r\n` +
-      `verbose_json\r\n`
+      `${this.azureMode ? 'json' : 'verbose_json'}\r\n`
     ));
 
     // Language part (if specified)
@@ -196,15 +210,28 @@ export class TranscriptionClient {
       ));
     }
 
-    // Request word-level timestamps
-    parts.push(Buffer.from(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="timestamp_granularities"\r\n\r\n` +
-      `word\r\n`
-    ));
+    // Multi-language hint: the set the model may switch between, one part per language.
+    if (this.azureMode && this.allowedLanguages) {
+      for (const lang of this.allowedLanguages) {
+        parts.push(Buffer.from(
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="languages[]"\r\n\r\n` +
+          `${lang}\r\n`
+        ));
+      }
+    }
+
+    // Request word-level timestamps (faster-whisper's granularity knob; not served by Azure)
+    if (!this.azureMode) {
+      parts.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="timestamp_granularities"\r\n\r\n` +
+        `word\r\n`
+      ));
+    }
 
     // Max speech segment duration (controls how often Whisper splits segments)
-    if (this.maxSpeechDurationSec !== undefined) {
+    if (!this.azureMode && this.maxSpeechDurationSec !== undefined) {
       parts.push(Buffer.from(
         `--${boundary}\r\n` +
         `Content-Disposition: form-data; name="max_speech_duration_s"\r\n\r\n` +
@@ -213,7 +240,7 @@ export class TranscriptionClient {
     }
 
     // Min silence duration for VAD segment splitting (lower = more splits at natural pauses)
-    if (this.minSilenceDurationMs !== undefined) {
+    if (!this.azureMode && this.minSilenceDurationMs !== undefined) {
       parts.push(Buffer.from(
         `--${boundary}\r\n` +
         `Content-Disposition: form-data; name="min_silence_duration_ms"\r\n\r\n` +
@@ -239,7 +266,8 @@ export class TranscriptionClient {
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
     };
     if (this.apiToken) {
-      headers['Authorization'] = `Bearer ${this.apiToken}`;
+      if (this.azureMode) headers['api-key'] = this.apiToken;
+      else headers['Authorization'] = `Bearer ${this.apiToken}`;
     }
 
     const controller = new AbortController();
@@ -260,7 +288,16 @@ export class TranscriptionClient {
 
       const data = await response.json() as any;
 
-      const allSegments = (data.segments || []).map((s: any) => ({
+      // Window duration from the PCM we sent (WAV = 44-byte header + 16-bit mono samples). A
+      // `json` backend returns text with no timing at all; the consumers downstream read a
+      // segment's span to place a turn, and a zero-length span collapses the whole window onto
+      // its first instant. The window IS the span we know, so state it.
+      const windowSec = Math.max(0, (wavBuffer.length - 44) / 2) / this.sampleRate;
+      const rawSegments = (data.segments && data.segments.length) || !this.azureMode
+        ? (data.segments || [])
+        : (String(data.text ?? '').trim() ? [{ start: 0, end: windowSec, text: data.text }] : []);
+
+      const allSegments = rawSegments.map((s: any) => ({
         start: s.start || 0,
         end: s.end || 0,
         text: s.text || '',
@@ -283,7 +320,7 @@ export class TranscriptionClient {
         text,
         language: data.language || language || 'unknown',
         language_probability: data.language_probability ?? 0,
-        duration: data.duration || 0,
+        duration: data.duration || (this.azureMode ? windowSec : 0),
         segments,
       };
     } finally {

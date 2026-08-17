@@ -137,6 +137,7 @@ def build_invocation(
     native_meeting_id: Optional[str],
     connection_id: str,
     language: Optional[str] = None,
+    allowed_languages: Optional[list[str]] = None,
     task: Optional[str] = None,
     transcription_tier: str = "realtime",
     redis_url: str,
@@ -174,6 +175,10 @@ def build_invocation(
         "meeting_id": meeting_id,
         "redisUrl": redis_url,
         "language": language,
+        # A bilingual room: the SET the STT backend may switch between, per window. `language`
+        # pins one; this one refuses to. None-stripped, so a single-language deployment's
+        # invocation is byte-identical to before.
+        "allowedLanguages": allowed_languages,
         "task": task,
         "transcriptionTier": transcription_tier,
         "transcribeEnabled": transcribe_enabled,

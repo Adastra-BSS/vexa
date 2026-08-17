@@ -317,6 +317,9 @@ services:
       - TRANSCRIPTION_SERVICE_URL=${TRANSCRIPTION_SERVICE_URL:-}
       - TRANSCRIPTION_SERVICE_TOKEN=${TRANSCRIPTION_SERVICE_TOKEN:-}
       - TRANSCRIPTION_MODEL=${TRANSCRIPTION_MODEL:-}
+      # The languages this deployment's rooms actually speak (comma-separated, e.g. `cs,en`) — sent
+      # to the backend as a multi-language hint, so a bilingual meeting is not pinned to one.
+      - TRANSCRIPTION_ALLOWED_LANGUAGES=${TRANSCRIPTION_ALLOWED_LANGUAGES:-}
       # Deployment-level defaults for a spawn's transcribe/recording flags when the request does not
       # say (config.v1 `defaulted` keys). TRANSCRIBE_ENABLED=false makes a no-STT deployment spawn
       # capture-only bots instead of 503-ing every default POST /bots.

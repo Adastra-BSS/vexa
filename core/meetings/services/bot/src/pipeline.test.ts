@@ -150,13 +150,34 @@ async function main(): Promise<void> {
     check('no transcriptionModel → default whisper-1 (wire unchanged)', modelParts[1] === 'whisper-1', JSON.stringify(modelParts[1]));
   }
 
+  // ── 4b) createTranscribe threads invocation.allowedLanguages → the STT wire. A bilingual room
+  //     (cs+en here) must reach the model as a language SET; the singular `language` part would pin
+  //     it to one and mistranslate every turn in the other. Observed at the wire against an AZURE
+  //     deployment URL, the only mode that serves the multi-language hint. ──
+  {
+    const realFetch = globalThis.fetch;
+    let body = '';
+    (globalThis as any).fetch = async (_url: unknown, init: { body: Buffer }) => {
+      body = Buffer.from(init.body).toString('latin1');
+      return new Response(JSON.stringify({ text: '' }), { status: 200 });
+    };
+    const pcm = new Float32Array(1600).fill(0.05);
+    const azureUrl = 'https://acct.openai.azure.com/openai/deployments/gpt-transcribe/audio/transcriptions?api-version=2025-04-01-preview';
+    await createTranscribe(baseInv({ transcriptionServiceUrl: azureUrl, allowedLanguages: ['cs', 'en'] }))(pcm);
+    (globalThis as any).fetch = realFetch;
+    const langs = [...body.matchAll(/name="languages\[\]"\r\n\r\n([^\r]*)\r\n/g)].map((m) => m[1]);
+    check('invocation.allowedLanguages ride the languages[] form parts', JSON.stringify(langs) === JSON.stringify(['cs', 'en']), JSON.stringify(langs));
+  }
+
   // ── 5) LEGACY MIXED LANE (Zoom/Jitsi) speaker-label boundary (#890): a turn the lane has NOT
   //     yet attributed publishes under its provisional cluster id (speaker 'seg_N'). At the bot
   //     boundary that must become the stable 'Speaker' label — NEVER the seg_N string as a display
   //     name — so per-speaker consumers group unattributed turns as ONE speaker, not hundreds.
   //     segment_id/speaker_key keep the unique turn key (the repaint anchor for late attribution);
   //     a REAL name passes through untouched (the predicate only rewrites /^seg_\d+$/). The internal
-  //     mixed-pipeline still uses seg_N as its key (claim.smoke.test.ts) — this rewrite is ABOVE it. ──
+  //     mixed-pipeline still uses seg_N as its key (claim.smoke.test.ts) — this rewrite is ABOVE it.
+  //     A LETTERED label ('Speaker A'/'Speaker AA') is NOT a refusal to separate — it names one
+  //     stable transport track — so it crosses the boundary intact. ──
   {
     const sink = captureSink();
     let cb: ChunkedTranscriberCallbacks | null = null;
@@ -187,13 +208,19 @@ async function main(): Promise<void> {
       junk?.segment_id === 'turn:54:0', junk?.segment_id);
     check('unattributed turn: speaker_key keeps the unique turn key — the identity survives the blank',
       junk?.speaker_key === 'turn:54:0', junk?.speaker_key);
-    // The letter tracks are the other spelling of "a distinct person we could not name", and the
-    // founder's ruling was about unknown speakers plural — they blank too.
+    // A LETTERED track makes a different claim from the two above: the lane could not NAME the
+    // voice, but it did SEPARATE it, and the letter is stable per transport track for the whole
+    // meeting. So it reaches the reader intact — blanking it merged every unnamed voice into ONE
+    // anonymous run, which is exactly what a per-speaker consumer must not be handed.
     cb!.publish('Speaker B', [{ text: 'and this', startMs: 3000, endMs: 4000, language: 'en', segmentId: 'turn:56:0' }], []);
+    cb!.publish('Speaker AA', [{ text: 'and me', startMs: 4000, endMs: 5000, language: 'en', segmentId: 'turn:57:0' }], []);
     await sleep(20);
     const letter = sink.published.find((s) => s.segment_id === 'turn:56:0');
-    check('a letter track ("Speaker B") also publishes an empty speaker',
-      letter?.speaker === '', JSON.stringify(letter));
+    const wide = sink.published.find((s) => s.segment_id === 'turn:57:0');
+    check('a letter track ("Speaker B") publishes its stable label — separated, just not named',
+      letter?.speaker === 'Speaker B', JSON.stringify(letter));
+    check('the 27th track onward ("Speaker AA") is a label too, not a blank',
+      wide?.speaker === 'Speaker AA', JSON.stringify(wide));
     check('…and keeps its own identity in speaker_key', letter?.speaker_key === 'turn:56:0', letter?.speaker_key);
     check('no seg_N string ever leaks as a display speaker across the mixed lane',
       sink.published.every((s) => !/^seg_\d+$/.test(s.speaker ?? '')), JSON.stringify(sink.published.map((s) => s.speaker)));

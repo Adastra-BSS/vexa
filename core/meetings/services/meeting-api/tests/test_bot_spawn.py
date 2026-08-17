@@ -120,6 +120,19 @@ def test_invocation_carries_stt_model_when_provided():
     assert "transcriptionModel" not in build_invocation(**base)
 
 
+def test_invocation_carries_allowed_languages_when_provided():
+    """A bilingual room reaches the backend as a language SET (sealed ``allowedLanguages``), so a
+    cs/en meeting is not pinned to one language per window. Absent → omitted, wire unchanged."""
+    token = mint_meeting_token(1, USER, "teams", "19:meeting_abc@thread.v2", secret=SECRET)
+    base = dict(meeting_id=1, platform="teams", meeting_url="https://teams.microsoft.com/l/meetup-join/x",
+                bot_name="VexaBot", token=token, native_meeting_id="19:meeting_abc@thread.v2",
+                connection_id="conn-1", redis_url="redis://redis:6379/0")
+    inv = build_invocation(**base, allowed_languages=["cs", "en"])
+    conforms_invocation(inv)
+    assert inv["allowedLanguages"] == ["cs", "en"]
+    assert "allowedLanguages" not in build_invocation(**base)
+
+
 def test_workload_spec_conforms_to_runtime_v1():
     inv = build_invocation(
         meeting_id=1, platform="google_meet", meeting_url="https://meet.google.com/x",
@@ -683,6 +696,34 @@ async def test_request_bot_env_transcription_model_rides_invocation(monkeypatch)
                       token_secret=SECRET)
     inv = json.loads(runtime.specs[0]["env"]["BOT_CONFIG"])
     assert "transcriptionModel" not in inv
+
+
+async def test_request_bot_env_allowed_languages_ride_invocation(monkeypatch):
+    """A bilingual deployment: ``TRANSCRIPTION_ALLOWED_LANGUAGES=cs,en`` reaches every bot's
+    invocation as a language SET the backend may switch between per window. Unset → the field is
+    omitted (None-stripped) and the invocation is byte-identical to a single-language deployment's."""
+    monkeypatch.setenv("TRANSCRIPTION_SERVICE_URL", "https://stt-env.vexa.ai")
+    monkeypatch.setenv("TRANSCRIPTION_SERVICE_TOKEN", "tok-env")
+    monkeypatch.delenv("ADMIN_API_URL", raising=False)
+
+    monkeypatch.setenv("TRANSCRIPTION_ALLOWED_LANGUAGES", " cs , en ,")
+    repo, runtime = InMemoryMeetingRepo(), FakeRuntimeClient()
+    await request_bot(repo, runtime, user_id=USER, platform="teams",
+                      native_meeting_id="19:meeting_abc@thread.v2",
+                      meeting_url="https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0",
+                      redis_url="redis://redis:6379/0", token_secret=SECRET)
+    inv = json.loads(runtime.specs[0]["env"]["BOT_CONFIG"])
+    # Whitespace trimmed, the trailing empty entry dropped, order preserved.
+    assert inv["allowedLanguages"] == ["cs", "en"]
+
+    monkeypatch.delenv("TRANSCRIPTION_ALLOWED_LANGUAGES", raising=False)
+    repo, runtime = InMemoryMeetingRepo(), FakeRuntimeClient()
+    await request_bot(repo, runtime, user_id=USER, platform="teams",
+                      native_meeting_id="19:meeting_abc@thread.v2",
+                      meeting_url="https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0",
+                      redis_url="redis://redis:6379/0", token_secret=SECRET)
+    inv = json.loads(runtime.specs[0]["env"]["BOT_CONFIG"])
+    assert "allowedLanguages" not in inv
 
 
 # ── route: meeting_url passthrough is SSRF-validated at entry (jitsi/zoom, TAKE on #543) ─────────

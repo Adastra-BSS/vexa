@@ -1,9 +1,15 @@
 # This fork
 
-A fork of [Vexa-ai/vexa](https://github.com/Vexa-ai/vexa) for an internal meeting-capture pilot. It
-exists for one reason: the pilot runs Vexa **capture-only** (the bot records, transcription happens
-afterwards against Azure OpenAI), and two upstream defects make that configuration unreachable on
-the auto-join path. Both are fixed in-tree here.
+A fork of [Vexa-ai/vexa](https://github.com/Vexa-ai/vexa) for an internal meeting-capture pilot,
+carrying what that pilot's deployment cannot express as configuration:
+
+- **Two upstream defects** that made a capture-only auto-join spawn unreachable (the pilot still
+  spawns bots through the auto-join sweep, and still needs `RECORDING_ENABLED` honoured there).
+- **The pilot's STT backend and its speaker contract**: transcription runs *in-call* against an
+  Azure OpenAI `gpt-transcribe` deployment, and every turn the bot separated has to reach the
+  reader as a distinct speaker. Neither is reachable from env alone — the Azure envelope differs
+  from the OpenAI-compatible one the client speaks, and the bot boundary blanked the very labels
+  that separate unnamed voices.
 
 Fork point: `1f6898c` (upstream `main`, PR #987).
 
@@ -29,12 +35,13 @@ on every container recreation. A fork is what makes them survive.
 |---|---|
 | `fix/spawn-defaults-honor-deployment-flags` | `request_bot` resolves both capture flags from the deployment when the caller has no opinion (`None`), so every caller — not only the HTTP route — honours `TRANSCRIBE_ENABLED` / `RECORDING_ENABLED`. `POST /bots` keeps its request-body resolvers, so an explicit value still wins and a non-boolean is still a 422. |
 | `fix/auto-join-stamps-every-spawn-refusal` | The sweep stamps `data.auto_join_error` for every way a spawn can refuse — the transcription and authenticated-bot config gates, plus a catch-all — instead of letting the exception abort the whole tick. No row is left `scheduled` with nothing written on it, and one row's failure no longer costs the rows behind it their bots. |
+| `feat/azure-stt-speaker-attribution` | Three seams, one capability: the shared STT client speaks the **Azure** envelope when its URL names a deployment (`api-key` header, URL verbatim, `response_format=json`, no faster-whisper-only parts) and rebuilds a window-spanning segment from a plain-`json` reply instead of collapsing it to `end: 0`; a **bilingual** room rides the sealed `allowedLanguages` (deployment knob `TRANSCRIPTION_ALLOWED_LANGUAGES=cs,en`) as a language set the model may switch between per window; and the bot boundary stops blanking the **lettered** speaker labels (`Speaker A/B/…`) — a letter is a refusal to *name*, not a refusal to *separate*, and blanking merged every unnamed voice into one anonymous run. `seg_N` and the bare contested `Speaker` still publish empty. |
 
-`jana-pilot` is the integration branch carrying both, and is what the pilot deploys.
+`jana-pilot` is the integration branch carrying all three, and is what the pilot deploys.
 
-The two fixes are kept on **separate branches off an unmodified upstream `main`**, each standing on
-its own, so either can be offered upstream as a clean PR later without untangling it from the other
-or from the pin. No upstream PR is open at present - this is a private-use fork for now.
+The changes are kept on **separate branches off an unmodified upstream `main`**, each standing on
+its own, so any of them can be offered upstream as a clean PR later without untangling it from the
+others or from the pin. No upstream PR is open at present - this is a private-use fork for now.
 
 ## Deliberately NOT fixed here: upstream #866
 
