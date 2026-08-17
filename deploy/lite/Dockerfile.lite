@@ -79,7 +79,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 # --retry rides out GitHub rate-limiting builder egress IPs (429 answers, common from ACR/CI pools);
 # curl backs off exponentially and honors Retry-After, so a limited window heals instead of failing.
-RUN curl -fsSL --retry 8 --retry-max-time 600 "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" -o /tmp/valkey.tar.gz \
+# GITHUB_TOKEN (optional, zero-scope) moves that rate limit from the builder's shared IP to the
+# token's own budget; empty keeps the fetch anonymous. Declared in this discarded stage only, so
+# the classic builder's arg-in-layer-history record never reaches the pushed image.
+ARG GITHUB_TOKEN=
+RUN curl -fsSL --retry 8 --retry-max-time 600 \
+      ${GITHUB_TOKEN:+-H "Authorization: Bearer ${GITHUB_TOKEN}"} \
+      "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" -o /tmp/valkey.tar.gz \
  && echo "${VALKEY_SHA256}  /tmp/valkey.tar.gz" | sha256sum -c - \
  && mkdir -p /tmp/valkey && tar -xzf /tmp/valkey.tar.gz -C /tmp/valkey --strip-components=1 \
  # OPTIMIZATION=-O2 keeps valkey's Makefile from adding -flto: GCC's lto-wrapper crashes under
