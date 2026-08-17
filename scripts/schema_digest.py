@@ -17,9 +17,22 @@ from __future__ import annotations
 
 import ast
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: The digest is ``ast.unparse`` output, and that formatting is INTERPRETER-DEPENDENT: 3.9 writes a
+#: zero-argument lambda as ``lambda : {}`` where 3.11+ writes ``lambda: {}``. Run under an older
+#: interpreter and every such column reads as drift — a seal that cannot be reproduced, and a gate
+#: that cries schema change over a space. Refuse instead of emitting bytes nobody else will compute.
+MIN_PYTHON = (3, 11)
+if sys.version_info < MIN_PYTHON:
+    sys.exit(
+        f"schema_digest: needs Python >= {'.'.join(map(str, MIN_PYTHON))} "
+        f"(ast.unparse formatting differs below it, so the digest would not match schema.seal.json); "
+        f"this is {sys.version.split()[0]} at {sys.executable}"
+    )
 
 # The schema-of-record + its mirror. Add a file here only when a NEW service owns real tables.
 MODEL_FILES = [

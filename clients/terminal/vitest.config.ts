@@ -11,6 +11,8 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // Web Storage: the runtime's own globals shadow jsdom's — see vitest.setup.ts.
+    setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/__tests__/**/*.test.ts", "src/**/__tests__/**/*.test.tsx"],
   },
 });

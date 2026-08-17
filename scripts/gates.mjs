@@ -1060,8 +1060,24 @@ function gateConfigContract() {
 // drop, or change (in admin-api's models or meeting-api's mirror) trips this gate and requires a
 // deliberate `pnpm seal:schema` re-seal — a human review step. This is the structural enforcement of
 // "no unreviewed database changes": a stray migration or model edit can no longer land silently.
+/** The interpreter the digest is reproducible under: `ast.unparse` formats a zero-argument lambda
+ *  differently below 3.11, so a machine whose `python3` is the old system one (macOS ships 3.9)
+ *  computes bytes that match no seal. Take the first interpreter on PATH that clears the floor —
+ *  $PYTHON wins when set — instead of trusting the name `python3`. */
+function _schemaPython() {
+  const candidates = [process.env.PYTHON, "python3", "python3.13", "python3.12", "python3.11"].filter(Boolean);
+  for (const py of candidates) {
+    try {
+      const ok = execSync(`${py} -c "import sys; print(sys.version_info >= (3, 11))"`, { stdio: ["ignore", "pipe", "ignore"] })
+        .toString().trim();
+      if (ok === "True") return py;
+    } catch { /* not installed — try the next */ }
+  }
+  throw new Error("no Python >= 3.11 on PATH (the digest's ast.unparse formatting needs it); set PYTHON=/path/to/python3");
+}
+
 function _schemaDigest() {
-  return JSON.parse(execSync("python3 scripts/schema_digest.py", { cwd: ROOT }).toString());
+  return JSON.parse(execSync(`${_schemaPython()} scripts/schema_digest.py`, { cwd: ROOT }).toString());
 }
 
 function _flattenSchema(d) {
@@ -1247,7 +1263,7 @@ if (which === "seal") {
 // `seal-schema` (not a gate) — freeze the current DB schema (tables+columns) into schema.seal.json.
 // Run ONLY after a deliberately-reviewed model change (the diff of schema.seal.json IS the review).
 if (which === "seal-schema") {
-  const digest = execSync("python3 scripts/schema_digest.py", { cwd: ROOT }).toString();
+  const digest = execSync(`${_schemaPython()} scripts/schema_digest.py`, { cwd: ROOT }).toString();
   writeFileSync(SCHEMA_SEAL, digest.endsWith("\n") ? digest : digest + "\n");
   const flat = _flattenSchema(JSON.parse(digest));
   const tables = new Set(Object.keys(flat).map((k) => k.split(".")[0]));
