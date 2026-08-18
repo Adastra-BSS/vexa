@@ -68,7 +68,9 @@ export type TranscriptionFaultKind =
   | 'bad_request'        // other 4xx
   | 'unknown';
 
-/** A typed STT failure. `source` lets a consumer attribute it; `retryable` drives backoff. */
+/** A typed STT failure. `source` lets a consumer attribute it; `retryable` drives backoff.
+ *  `retryAfterMs` is the SERVER'S wait directive when it gave one — a rate limit renews on the
+ *  server's clock, not the client's, so a retry sooner than this is guaranteed to fail again. */
 export class TranscriptionError extends Error {
   readonly source = 'stt' as const;
   constructor(
@@ -76,18 +78,41 @@ export class TranscriptionError extends Error {
     readonly status: number | undefined,
     readonly detail: string | undefined,
     readonly retryable: boolean,
+    readonly retryAfterMs?: number,
   ) {
     super(`stt ${kind}${status ? ` (HTTP ${status})` : ''}${detail ? `: ${detail}` : ''}`);
     this.name = 'TranscriptionError';
   }
 }
 
+/** Ceiling on a server-directed wait: a directive past this is a misconfigured backend, not a
+ *  quota window, and a transcription window must not stall behind it. Azure's per-minute quota
+ *  directs at most ~59s, which this comfortably clears. */
+const MAX_RETRY_AFTER_MS = 120_000;
+
+/** The server's wait directive, in ms: the `Retry-After` header (delta-seconds or HTTP-date),
+ *  or the wait Azure spells out in its throttle body ("Please retry after 59 seconds").
+ *  Undefined when the response directs no pace, leaving the client to its own backoff. */
+export function serverRetryAfterMs(headers: Headers, body: string): number | undefined {
+  const clamp = (ms: number) => Math.min(Math.max(0, ms), MAX_RETRY_AFTER_MS);
+  const header = headers.get('retry-after');
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds)) return clamp(seconds * 1000);
+    const date = Date.parse(header);
+    if (Number.isFinite(date)) return clamp(date - Date.now());
+  }
+  const prose = /retry after (\d+) second/i.exec(body);
+  if (prose) return clamp(Number(prose[1]) * 1000);
+  return undefined;
+}
+
 /** Map an HTTP status to a typed fault (the anti-corruption translation, P5). */
-function classifyHttp(status: number, detail?: string): TranscriptionError {
+function classifyHttp(status: number, detail?: string, retryAfterMs?: number): TranscriptionError {
   if (status === 402) return new TranscriptionError('payment_required', status, detail, false);
   if (status === 401 || status === 403) return new TranscriptionError('unauthorized', status, detail, false);
-  if (status === 429) return new TranscriptionError('rate_limited', status, detail, true);
-  if (status >= 500) return new TranscriptionError('unavailable', status, detail, true);
+  if (status === 429) return new TranscriptionError('rate_limited', status, detail, true, retryAfterMs);
+  if (status >= 500) return new TranscriptionError('unavailable', status, detail, true, retryAfterMs);
   if (status >= 400) return new TranscriptionError('bad_request', status, detail, false);
   return new TranscriptionError('unknown', status, detail, false);
 }
@@ -152,8 +177,12 @@ export class TranscriptionClient {
         const isLastAttempt = attempt === this.maxRetries;
 
         if (fault.retryable && !isLastAttempt) {
-          const delay = this.retryDelayMs * Math.pow(2, attempt);
-          log(`[TranscriptionClient] ${fault.kind} (attempt ${attempt + 1}/${this.maxRetries + 1}): ${fault.message}. Retrying in ${delay}ms...`);
+          // The server's directive wins over local backoff; jitter de-synchronizes the
+          // concurrent windows that were all throttled by the same quota renewal.
+          const delay = fault.retryAfterMs !== undefined
+            ? fault.retryAfterMs + Math.floor(Math.random() * 1000)
+            : this.retryDelayMs * Math.pow(2, attempt);
+          log(`[TranscriptionClient] ${fault.kind} (attempt ${attempt + 1}/${this.maxRetries + 1}): ${fault.message}. Retrying in ${delay}ms${fault.retryAfterMs !== undefined ? ' (server-directed)' : ''}...`);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
@@ -283,7 +312,8 @@ export class TranscriptionClient {
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unable to read error response');
-        throw classifyHttp(response.status, errorText);   // typed fault (P5/P18), not a bare Error
+        // typed fault (P5/P18), not a bare Error — carrying the server's retry pace when it gave one
+        throw classifyHttp(response.status, errorText, serverRetryAfterMs(response.headers, errorText));
       }
 
       const data = await response.json() as any;

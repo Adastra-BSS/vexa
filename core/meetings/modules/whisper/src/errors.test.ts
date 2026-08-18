@@ -4,7 +4,7 @@
  * permanent 402. Stubs global fetch to inject HTTP statuses.
  * Run: npm test (chained)  or  npx tsx src/errors.test.ts
  */
-import { TranscriptionClient, TranscriptionError } from './index.js';
+import { TranscriptionClient, TranscriptionError, serverRetryAfterMs } from './index.js';
 
 let failed = 0;
 const check = (name: string, cond: boolean, detail = '') => {
@@ -51,6 +51,48 @@ async function run() {
     const client = new TranscriptionClient({ serviceUrl: 'http://stt.test', maxRetries: 1, retryDelayMs: 1 });
     const f = await faultOf(() => client.transcribe(pcm, 'en'));
     check('401 → kind=unauthorized, non-retryable', f?.kind === 'unauthorized' && f?.retryable === false);
+  }
+
+  // The server's retry pace, read off the throttle response in every shape Azure sends it.
+  {
+    const h = (pairs: Record<string, string> = {}) => new Headers(pairs);
+    check('Retry-After delta-seconds header → that many ms',
+      serverRetryAfterMs(h({ 'retry-after': '59' }), '') === 59_000);
+    const azureBody = '{"error":{"code":"RateLimitReached","message": "Please retry after 59 seconds. To increase your default rate limit, visit: https://aka.ms/oai/quotaincrease."}}';
+    check('Azure prose body (no header) → 59s',
+      serverRetryAfterMs(h(), azureBody) === 59_000);
+    check('header wins over body prose',
+      serverRetryAfterMs(h({ 'retry-after': '2' }), azureBody) === 2_000);
+    check('pathological directive is capped, not obeyed',
+      serverRetryAfterMs(h({ 'retry-after': '86400' }), '') === 120_000);
+    check('no directive anywhere → undefined (client backoff applies)',
+      serverRetryAfterMs(h(), 'plain error') === undefined);
+  }
+
+  // 429 with a server directive: the wait between attempts is the directive, not the
+  // client's own backoff — a retry inside the quota window is guaranteed to fail again.
+  {
+    let calls = 0;
+    const times: number[] = [];
+    (globalThis as any).fetch = async () => {
+      calls++;
+      times.push(Date.now());
+      if (calls === 1) return new Response('throttled', { status: 429, headers: { 'retry-after': '1' } });
+      return new Response(JSON.stringify({ text: 'ok', language: 'en', duration: 0.1, segments: [] }), { status: 200 });
+    };
+    const client = new TranscriptionClient({ serviceUrl: 'http://stt.test', maxRetries: 2, retryDelayMs: 1 });
+    const result = await client.transcribe(pcm, 'en');
+    const waited = times[1] - times[0];
+    check('429 + Retry-After: 1 → second attempt succeeds', result.text === 'ok' && calls === 2, `calls=${calls}`);
+    check('429 + Retry-After: 1 → waited the directed second, not retryDelayMs', waited >= 1000, `waited=${waited}ms`);
+  }
+  // 429 with no directive: the client's own exponential backoff still applies.
+  {
+    const calls = stubFetch(429, 'throttled, no directive');
+    const client = new TranscriptionClient({ serviceUrl: 'http://stt.test', maxRetries: 2, retryDelayMs: 1 });
+    const f = await faultOf(() => client.transcribe(pcm, 'en'));
+    check('429 (no directive) → kind=rate_limited, retried maxRetries+1 times', f?.kind === 'rate_limited' && calls() === 3, `calls=${calls()}`);
+    check('429 (no directive) → no retryAfterMs on the fault', f?.retryAfterMs === undefined);
   }
 
   (globalThis as any).fetch = realFetch;
