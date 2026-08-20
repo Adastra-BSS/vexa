@@ -281,8 +281,35 @@
    "key": "STORAGE_BACKEND",
    "class": "defaulted",
    "default": "minio",
-   "description": "storage-backend label stamped into the recording's meeting.data JSONB",
-   "targets": []
+   "description": "recordings storage backend: 'minio' (S3-compatible, the default) or 'azure' (Azure Blob). Selects the Storage adapter build_storage_from_env constructs AND is stamped into each recording's storage_backend field in meeting.data JSONB — ONE var, so a tape's label and the dispatch that placed its bytes cannot disagree",
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
+  },
+  {
+   "key": "AZURE_STORAGE_CONNECTION_STRING",
+   "class": "capability",
+   "capability": "azure_object_storage",
+   "secret": true,
+   "description": "Azure Blob account connection string (AccountName + AccountKey, or a SAS) recordings are written to when STORAGE_BACKEND=azure; boot refuses, naming this key, when the backend is azure and it is unset",
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
+  },
+  {
+   "key": "AZURE_STORAGE_CONTAINER",
+   "class": "defaulted",
+   "default": "vexa",
+   "description": "Azure Blob container recordings are written to (the azure counterpart of MINIO_BUCKET); it must already exist — the adapter never creates it",
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
   },
   {
    "key": "MEETING_TOKEN_TTL_SECONDS",
@@ -665,6 +692,11 @@
    "description": "recordings persist to the object store (chunk upload + finalize → meeting.data JSONB)",
    "mode": "all",
    "when_unconfigured": "recording upload/finalize fails at request time with a storage auth error; transcripts are unaffected"
+  },
+  "azure_object_storage": {
+   "description": "recordings persist to Azure Blob Storage instead of the S3-compatible store (STORAGE_BACKEND=azure)",
+   "mode": "all",
+   "when_unconfigured": "with STORAGE_BACKEND=azure the storage factory raises at BOOT naming AZURE_STORAGE_CONNECTION_STRING — the deployment refuses to start rather than accept recordings it cannot persist; under the default STORAGE_BACKEND=minio the capability is simply unused"
   }
  }
 }

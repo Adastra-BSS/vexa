@@ -137,6 +137,16 @@ The defaults (`5` / `10`) match that budget.
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `vexa-access-key` / `vexa-secret-key` | MinIO root credentials. |
 | `MINIO_BUCKET` | `vexa` | Bucket holding recordings and agent workspaces. |
 | `MINIO_SECURE` | `false` | Use TLS to reach MinIO. |
+| `STORAGE_BACKEND` | `minio` | Which object store recordings are written to: `minio` (any S3-compatible store) or `azure` (Azure Blob Storage). Also stamped into each recording's `storage_backend` field, so a recording says where its bytes went. |
+| `AZURE_STORAGE_CONNECTION_STRING` | — | Azure Blob connection string (account key or SAS). **Required** when `STORAGE_BACKEND=azure` — meeting-api refuses to start without it rather than accept recordings it cannot persist. |
+| `AZURE_STORAGE_CONTAINER` | `vexa` | Azure Blob container holding recordings. It must already exist; Vexa never creates it. |
+
+<Note>
+`STORAGE_BACKEND=azure` replaces MinIO for **recordings**, so a deployment that sets it doesn't need
+the MinIO service for them at all (on Kubernetes, pair it with `minio.enabled=false` if nothing else
+in your deployment uses the bucket). The default is `minio` and every `MINIO_*` key keeps its meaning,
+so switching either way — including rolling back — is an environment change, not a different image.
+</Note>
 
 ## Agent inference (bring your own)
 

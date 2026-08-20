@@ -40,7 +40,7 @@ def test_declaration_loads_and_is_internally_consistent():
     decl = cp.load_declaration()
     assert decl["service"] == "meeting-api"
     caps = decl["capabilities"]
-    assert set(caps) == {"stt", "object_storage"}
+    assert set(caps) == {"stt", "object_storage", "azure_object_storage"}
     # the canonical capability carries the live auth probe (the silent-401 incident's fix)
     assert caps["stt"]["probe"]["kind"] == "http"
     # every capability-classed key resolves (load_declaration raises otherwise) and stt's members
@@ -50,6 +50,46 @@ def test_declaration_loads_and_is_internally_consistent():
     # required-explicit is exactly the A4 boot bar
     required = {k["key"] for k in decl["keys"] if k["class"] == "required-explicit"}
     assert required == {"ADMIN_TOKEN"}
+
+
+def test_azure_object_storage_capability_is_declared_for_every_surface():
+    """The azure storage backend is reachable from all three deploy surfaces, so its keys must be
+    plumbed by all three — otherwise `STORAGE_BACKEND=azure` is settable somewhere the connection
+    string never arrives, and the deployment refuses to boot with no way to fix it from that surface.
+    """
+    decl = cp.load_declaration()
+    by_key = {k["key"]: k for k in decl["keys"]}
+    all_surfaces = ["compose", "helm", "lite"]
+
+    members = {k["key"] for k in decl["keys"] if k.get("capability") == "azure_object_storage"}
+    assert members == {"AZURE_STORAGE_CONNECTION_STRING"}, (
+        "the connection string alone decides the capability — the container has a working default"
+    )
+    conn = by_key["AZURE_STORAGE_CONNECTION_STRING"]
+    assert conn["secret"] is True, "an account key is a credential (P14): never logged, never goldened"
+    assert conn["targets"] == all_surfaces
+
+    container = by_key["AZURE_STORAGE_CONTAINER"]
+    assert container["class"] == "defaulted" and container["default"] == "vexa"
+    assert container["targets"] == all_surfaces
+
+    # STORAGE_BACKEND graduated from an in-code label (targets: []) to the deploy-plumbed selector
+    # that decides which adapter build_storage_from_env constructs.
+    backend = by_key["STORAGE_BACKEND"]
+    assert backend["class"] == "defaulted" and backend["default"] == "minio", (
+        "the default must stay minio — that is what makes an image rollback with unchanged env safe"
+    )
+    assert backend["targets"] == all_surfaces
+
+
+def test_azure_object_storage_declares_no_probe():
+    """Deliberate: the declared probe kinds are http and file, and neither can SIGN the SharedKey/SAS
+    request a blob endpoint demands — an unsigned GET answers 403 for a perfectly good connection
+    string, so a probe here would paint every healthy azure deployment misconfigured. Same
+    probe-less shape as `object_storage`."""
+    caps = cp.load_declaration()["capabilities"]
+    assert "probe" not in caps["azure_object_storage"]
+    assert "probe" not in caps["object_storage"], "the S3 side is probe-less for the same reason"
 
 
 def test_db_pool_keys_declared_defaulted():
