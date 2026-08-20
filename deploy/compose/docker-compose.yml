@@ -65,7 +65,10 @@ services:
     ports:
       - "127.0.0.1:${AZURITE_HOST_PORT:-10000}:10000"
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      # 127.0.0.1, not localhost: Azurite binds 0.0.0.0 (IPv4) while `localhost` resolves to ::1
+      # first in this image, so the probe would connect to nothing and the service would never
+      # report healthy despite listening perfectly well.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "10000"]
       interval: 5s
       timeout: 5s
       retries: 5

@@ -147,7 +147,7 @@ up: preflight
 			azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck --location /data > /dev/null; \
 	fi; \
 	echo "  Waiting for Azurite (up to 120s)..."; \
-	for i in $$(seq 1 24); do docker exec $(AZURITE_CONTAINER) nc -z localhost 10000 2>/dev/null && break; sleep 5; done; \
+	for i in $$(seq 1 24); do docker exec $(AZURITE_CONTAINER) nc -z 127.0.0.1 10000 2>/dev/null && break; sleep 5; done; \
 	echo "  ✓ Azurite ready"; \
 	if [ -n "$(LOCAL_STT)" ]; then \
 		echo "Starting local CPU STT ($(WHISPER_CONTAINER), $(WHISPER_MODEL))..."; \
