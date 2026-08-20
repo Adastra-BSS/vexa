@@ -83,6 +83,13 @@
    "targets": []
   },
   {
+   "key": "RUNTIME_K8S_SHM_SIZE",
+   "class": "defaulted",
+   "default": "2Gi",
+   "description": "size of the memory-backed /dev/shm mounted on every spawned Pod (k8s backend) — the counterpart of DOCKER_SHM_SIZE, since a Pod's default 64MB /dev/shm kills Chromium. Memory-backed, so it counts against the container's memory limit",
+   "targets": []
+  },
+  {
    "key": "RUNTIME_STOP_GRACE_SEC",
    "class": "defaulted",
    "default": "30",

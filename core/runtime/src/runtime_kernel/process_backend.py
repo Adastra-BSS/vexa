@@ -78,7 +78,9 @@ class ProcessBackend:
         # exit codes are unobservable without a live handle anyway.
         self._capture: dict[str, dict] = {}
 
-    def start(self, workload_id: str, runnable: Runnable, env: dict[str, str]) -> WorkloadHandle:
+    def start(self, workload_id: str, runnable: Runnable, env: dict[str, str],
+              resources=None) -> WorkloadHandle:
+        # `resources` is accepted for the Backend port's shape and ignored here — a bare process has no resource substrate.
         if not runnable.command:
             raise ValueError("process backend requires a command")
         # Workspace mount set (WP-A1.1): the lite/process backend shares the HOST filesystem — there is

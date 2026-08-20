@@ -158,13 +158,23 @@ def test_k8s_pod_overrides_carry_the_per_mount_spec():
     assert spec["volumes"][0]["persistentVolumeClaim"]["claimName"] == "vexa-agent-workspaces"
     c = spec["containers"][0]
     assert c["name"] == "vexa-worker-u1"
-    assert c["volumeMounts"] == [
+    # The workspace mounts are asserted by identity rather than by whole-list equality: every Pod
+    # also carries the unconditional /dev/shm mount (test_k8s_pod_shape.py), which is not a
+    # workspace concern and must not make this test a tripwire for it.
+    workspace_mounts = [vm for vm in c["volumeMounts"] if vm["name"] == "workspace-store"]
+    assert workspace_mounts == [
         {"name": "workspace-store", "mountPath": "/workspaces/u1", "subPath": "u1", "readOnly": False}
     ]
 
 
-def test_k8s_pod_overrides_none_when_no_store_configured():
-    assert pod_overrides({}, container_name="x") is None
+def test_k8s_pod_overrides_carry_no_workspace_volume_when_no_store_configured():
+    """This used to assert None. It no longer can: every spawned Pod gets a /dev/shm volume whether
+    or not it has a workspace store (see test_k8s_pod_shape.py — the browser bot is precisely the
+    workload with no store and the greatest need). What the workspace seam still owes is that it
+    contributes NOTHING when unconfigured, which is what this now pins."""
+    spec = pod_overrides({}, container_name="x")["spec"]
+    assert not [v for v in spec["volumes"] if "persistentVolumeClaim" in v]
+    assert not [vm for vm in spec["containers"][0]["volumeMounts"] if vm["name"] == "workspace-store"]
 
 
 # ── k8s: scheduling constraints merged into the spawn override (#673) ──────────
@@ -195,12 +205,18 @@ def test_k8s_pod_overrides_tolerations_only_no_pvc_builds_a_valid_spec():
     spec = ov["spec"]
     assert spec["tolerations"] == _TOL
     assert spec["nodeSelector"] == _SEL
-    assert "volumes" not in spec                           # no PVC ⇒ no volumes, but scheduling stands
-    # LOAD-BEARING (witnessed live, v0.12.8 staging): `kubectl run --overrides` merges the containers
-    # LIST by replacement, so ANY containers entry here wipes the generated container's image/env/command
-    # and the API server rejects the Pod (`spec.containers[0].image: Required value`) — the spawn dies in
-    # <1s. Scheduling-only overrides must NOT touch the containers list.
-    assert "containers" not in spec
+    assert not [v for v in spec["volumes"] if "persistentVolumeClaim" in v]  # no PVC, scheduling stands
+    # This assertion used to read `"containers" not in spec`, for a real reason: `kubectl run
+    # --overrides` defaults to --override-type=merge, which replaces the containers LIST wholesale,
+    # so any entry here wiped the generated image/env/command and the API server rejected the Pod
+    # (`spec.containers[0].image: Required value`) — witnessed live on v0.12.8 staging.
+    #
+    # The constraint was not ignored, it was removed: the backend now passes
+    # --override-type=strategic, which merges containers BY NAME so an entry AUGMENTS the generated
+    # container (verified against a real API server; see test_k8s_pod_shape.py). What still has to
+    # hold is that SCHEDULING never leaks into the containers entry — it is pod-level.
+    assert "tolerations" not in spec["containers"][0]
+    assert "nodeSelector" not in spec["containers"][0]
 
 
 def test_k8s_pod_overrides_merges_pvc_and_scheduling():
@@ -212,7 +228,7 @@ def test_k8s_pod_overrides_merges_pvc_and_scheduling():
     )
     spec = ov["spec"]
     assert spec["volumes"][0]["persistentVolumeClaim"]["claimName"] == "vexa-agent-workspaces"
-    assert spec["containers"][0]["volumeMounts"] == [
+    assert [vm for vm in spec["containers"][0]["volumeMounts"] if vm["name"] == "workspace-store"] == [
         {"name": "workspace-store", "mountPath": "/workspaces/u1", "subPath": "u1", "readOnly": False}
     ]
     assert spec["tolerations"] == _TOL
@@ -223,12 +239,13 @@ def test_k8s_pod_overrides_empty_scheduling_is_unchanged_from_today():
     """The chart's DEFAULT deployment serializes global.tolerations=[] / global.nodeSelector={} to the
     strings "[]" / "{}". These are treated as unset — no scheduling appears, and a no-store spawn still
     returns None — so an untainted cluster sees exactly today's behaviour (no regression)."""
-    assert pod_overrides({"RUNTIME_K8S_TOLERATIONS": "[]", "RUNTIME_K8S_NODE_SELECTOR": "{}"},
-                         container_name="x") is None
+    empty = pod_overrides({"RUNTIME_K8S_TOLERATIONS": "[]", "RUNTIME_K8S_NODE_SELECTOR": "{}"},
+                          container_name="x")["spec"]
+    assert "tolerations" not in empty and "nodeSelector" not in empty
     ov = pod_overrides(_sched_env(tolerations=[], node_selector={}, source="vexa-agent-workspaces"),
                        container_name="vexa-worker-u1")
     assert "tolerations" not in ov["spec"] and "nodeSelector" not in ov["spec"]
-    assert ov["spec"]["volumes"]                           # volumes-only spec, exactly as before #673
+    assert [v for v in ov["spec"]["volumes"] if "persistentVolumeClaim" in v]  # store volume stands
 
 
 def test_k8s_pod_overrides_malformed_scheduling_json_fails_loud():

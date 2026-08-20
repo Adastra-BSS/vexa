@@ -174,7 +174,9 @@ class DockerBackend:
             )
         return target
 
-    def start(self, workload_id: str, runnable: Runnable, env: dict[str, str]) -> WorkloadHandle:
+    def start(self, workload_id: str, runnable: Runnable, env: dict[str, str],
+              resources=None) -> WorkloadHandle:
+        # `resources` is accepted for the Backend port's shape and ignored here — the docker backend expresses limits through its own host_config.
         if not runnable.image:
             raise ValueError("docker backend requires an image")
         name = self._cname(workload_id)

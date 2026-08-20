@@ -25,6 +25,15 @@ WORKLOAD_ID_LABEL = "runtime.workload_id"
 TOLERATIONS_ENV = "RUNTIME_K8S_TOLERATIONS"      # JSON array of toleration objects
 NODE_SELECTOR_ENV = "RUNTIME_K8S_NODE_SELECTOR"  # JSON object of node-label selectors
 
+# A Pod's default /dev/shm is 64MB, which Chromium does not survive — the same reason the docker
+# backend has always passed ShmSize (DOCKER_SHM_SIZE, default 2g). This is that knob's k8s
+# counterpart: the size of the memory-backed emptyDir mounted at /dev/shm on every spawned Pod.
+# Memory-backed means it counts against the container's memory limit, so a bot's limit must leave
+# room for it.
+SHM_SIZE_ENV = "RUNTIME_K8S_SHM_SIZE"
+SHM_SIZE_DEFAULT = "2Gi"
+SHM_VOLUME_NAME = "dshm"
+
 
 def _scheduling_json(env: dict[str, str], key: str, expected: type) -> Optional[object]:
     """Parse one scheduling knob (``key``) from ``env`` as JSON of ``expected`` shape. Unset or empty
@@ -72,37 +81,74 @@ def _stop_grace_sec() -> int:
         return 30
 
 
-def pod_overrides(env: dict[str, str], *, container_name: str) -> Optional[dict]:
-    """The ``kubectl run --overrides`` spec for a spawned Pod, built from the SAME env. It carries two
-    independent seams:
+def _k8s_resources(resources) -> Optional[dict]:
+    """``WorkloadSpec.resources`` → a Pod container's ``resources`` block, or None when nothing was
+    asked for.
 
+    requests == limits deliberately: a bot pool autoscales on schedulability, so a Pod with no
+    REQUESTS tells the autoscaler nothing (nodes never scale up and bots pack until they OOM each
+    other), while a request below the limit lets a node accept more bots than it was sized for. Equal
+    values make each bot Guaranteed QoS and make per-node packing exactly what the pool was sized for.
+
+    Only what the spec names is emitted — inventing a cpu limit for a memory-only spec would throttle
+    the browser. GPU is limits-only: the device plugin exposes it as an extended resource, and a
+    requests entry for it is invalid."""
+    if resources is None:
+        return None
+    requests: dict[str, str] = {}
+    limits: dict[str, str] = {}
+    if resources.cpu is not None:
+        requests["cpu"] = limits["cpu"] = str(resources.cpu)
+    if resources.memoryMb is not None:
+        requests["memory"] = limits["memory"] = f"{resources.memoryMb}Mi"
+    if resources.gpu is not None:
+        limits["nvidia.com/gpu"] = str(resources.gpu)
+    if not requests and not limits:
+        return None
+    out: dict = {}
+    if requests:
+        out["requests"] = requests
+    if limits:
+        out["limits"] = limits
+    return out
+
+
+def pod_overrides(env: dict[str, str], *, container_name: str, resources=None) -> Optional[dict]:
+    """The ``kubectl run --overrides`` spec for a spawned Pod, built from the SAME env. It carries
+    four seams:
+
+      * ``/dev/shm`` — a memory-backed emptyDir, because a Pod's default 64MB kills Chromium. This is
+        the one seam that is UNCONDITIONAL, and deliberately so: a plain meeting bot carries no PVC,
+        no scheduling constraints and often no resources, and it is exactly the workload that needs
+        the shm. Gating it on any other seam would hand it to every workload except the browser;
       * the workspace store mount set (WP-A1.1): the store PVC (``VEXA_WORKSPACE_MOUNT_SOURCE`` = the
         claim name on k8s) exposes every in-store workspace via per-mount subPath volumeMounts;
+      * ``resources`` — the spec's requests/limits (see ``_k8s_resources``);
       * the runtime's scheduling constraints (``RUNTIME_K8S_TOLERATIONS`` / ``RUNTIME_K8S_NODE_SELECTOR``)
         so the bare ``kubectl run`` Pod — which inherits none of the runtime Deployment's scheduling —
         lands where the runtime itself is allowed to run instead of stranding Pending on a tainted pool.
 
-    The spec is built whenever EITHER seam is present; returns None only when neither is (no override
-    needed). Building it for scheduling alone is load-bearing: a plain meeting bot has no workspace PVC,
-    so a volumes-only early return would silently drop its tolerations and re-create the bug. Pure/
-    env-driven → unit-tested offline (no kubectl)."""
+    Because the shm mount is unconditional this NEVER returns None any more (the Optional stays for
+    the port's shape). It also always emits a ``containers`` entry, which is only survivable under
+    ``--override-type=strategic`` — see ``K8sBackend.start``. Pure/env-driven → unit-tested offline
+    (no kubectl)."""
     pvc = env.get("VEXA_WORKSPACE_MOUNT_SOURCE")
     root = env.get("VEXA_WORKSPACE_MOUNT_TARGET")
     volumes, volume_mounts = k8s_volume_mounts(env, pvc_name=pvc or "", store_target=root or "")
     tolerations = _scheduling_json(env, TOLERATIONS_ENV, list)
     node_selector = _scheduling_json(env, NODE_SELECTOR_ENV, dict)
-    if not volumes and not tolerations and not node_selector:
-        return None
-    # ``kubectl run --overrides`` merges the containers LIST by replacement (json-merge, not
-    # strategic), so a containers entry here wipes the generated container — image, env, command —
-    # and the API server rejects the Pod (`spec.containers[0].image: Required value`), killing the
-    # spawn instantly. Emit ``containers`` ONLY when volumeMounts force it (the workspace-store
-    # seam); pod-level fields (tolerations/nodeSelector) merge fine without touching the list.
-    spec: dict = {}
-    if volume_mounts:
-        spec["containers"] = [{"name": container_name, "volumeMounts": volume_mounts}]
-    if volumes:
-        spec["volumes"] = volumes
+
+    shm_size = (env.get(SHM_SIZE_ENV) or "").strip() or SHM_SIZE_DEFAULT
+    volumes = [*volumes, {"name": SHM_VOLUME_NAME,
+                          "emptyDir": {"medium": "Memory", "sizeLimit": shm_size}}]
+    volume_mounts = [*volume_mounts, {"name": SHM_VOLUME_NAME, "mountPath": "/dev/shm"}]
+
+    container: dict = {"name": container_name, "volumeMounts": volume_mounts}
+    limits = _k8s_resources(resources)
+    if limits:
+        container["resources"] = limits
+
+    spec: dict = {"containers": [container], "volumes": volumes}
     if tolerations:
         spec["tolerations"] = tolerations
     if node_selector:
@@ -123,7 +169,8 @@ class K8sBackend:
     def _ns_args(self) -> list[str]:
         return ["-n", self._ns] if self._ns else []
 
-    def start(self, workload_id: str, runnable: Runnable, env: dict[str, str]) -> WorkloadHandle:
+    def start(self, workload_id: str, runnable: Runnable, env: dict[str, str],
+              resources=None) -> WorkloadHandle:
         if not runnable.image:
             raise ValueError("k8s backend requires an image")
         name = self._pname(workload_id)
@@ -141,9 +188,17 @@ class K8sBackend:
         # latter live in the runtime's PROCESS env (the chart sets them on the runtime Deployment), not
         # in the per-workload spec.env, so overlay them here; the workload's own --env (above) is left
         # untouched — scheduling shapes the Pod, it is not container config.
-        overrides = pod_overrides({**env, **_runtime_scheduling_env()}, container_name=name)
+        overrides = pod_overrides({**env, **_runtime_scheduling_env()}, container_name=name,
+                                  resources=resources)
         if overrides:
-            args += ["--overrides", json.dumps(overrides)]
+            # --override-type=strategic is LOAD-BEARING, not a preference. kubectl defaults to
+            # `merge` (a JSON merge patch), which replaces the containers LIST wholesale: the entry
+            # above would wipe the generated container's image, env and command and the API server
+            # answers `spec.containers[0].image: Required value` — the spawn dies in <1s (witnessed
+            # live on v0.12.8 staging). A strategic merge patch merges containers BY NAME, so an
+            # entry carrying only `name` plus volumeMounts/resources AUGMENTS the generated
+            # container. This is what makes /dev/shm and resource limits expressible at all.
+            args += ["--override-type=strategic", "--overrides", json.dumps(overrides)]
         if runnable.command:
             args += ["--command", "--", *runnable.command]
         _kubectl(*args)
