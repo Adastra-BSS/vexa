@@ -263,4 +263,37 @@ else
   echo "  OK: Secret omits AZURE_STORAGE_CONNECTION_STRING when unset"
 fi
 
+# #37 — digest pinning. A tag says which build you ASKED for and can be re-pointed afterwards; a
+# digest says which build is RUNNING. The AKS deployment pins every component by digest, so a
+# release manifest reports exactly what is on the nodes.
+DIG='sha256:1111111111111111111111111111111111111111111111111111111111111111'
+RENDER_DIG="$(helm template vexa "$CHART" -n vexa -f "$CHART/values-test.yaml" \
+  --set meetingApi.image.digest="$DIG" --set global.imageTag=vSHOULD-NOT-UNPIN \
+  --show-only templates/deployment-meeting-api.yaml)"
+if grep -qE "image: \".*@${DIG}\"" <<< "$RENDER_DIG"; then
+  echo "  OK: a component digest renders as repository@digest"
+else
+  echo "  FAIL: meetingApi.image.digest did not render as a digest reference"; fail=1
+fi
+# The trap this replaces: emptying the tag to smuggle a digest through the repository rendered
+# `repo@sha256:...:` — a reference no runtime accepts. Assert no stray separator survives.
+if grep -qE "image: \".*@sha256:[a-f0-9]+:" <<< "$RENDER_DIG"; then
+  echo "  FAIL: rendered image carries a trailing tag separator after the digest"; fail=1
+else
+  echo "  OK: no trailing separator after the digest"
+fi
+# global.imageTag must NOT unpin a pinned component: a release-wide tag silently overriding an
+# explicit digest is exactly the surprise digest pinning exists to prevent.
+if grep -q 'vSHOULD-NOT-UNPIN' <<< "$RENDER_DIG"; then
+  echo "  FAIL: global.imageTag overrode an explicit digest"; fail=1
+else
+  echo "  OK: global.imageTag does not override an explicit digest"
+fi
+# Unset digest → today's tag behaviour, unchanged.
+if grep -qE 'image: "vexaai/v012-meeting-api:' <<< "$RENDER"; then
+  echo "  OK: no digest set → the tag path is unchanged"
+else
+  echo "  FAIL: default render lost its tag-based meeting-api image"; fail=1
+fi
+
 [ "$fail" -eq 0 ] && { echo "gate:helm PASS"; exit 0; } || { echo "gate:helm FAIL"; exit 1; }

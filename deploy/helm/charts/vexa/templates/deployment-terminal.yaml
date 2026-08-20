@@ -30,7 +30,7 @@ spec:
         - name: terminal
           securityContext:
             {{- toYaml .Values.global.securityContext | nindent 12 }}
-          image: "{{ .Values.terminal.image.repository }}:{{ .Values.global.imageTag | default .Values.terminal.image.tag }}"
+          image: {{ include "vexa.image" (list . .Values.terminal.image) | quote }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           ports:
             - name: http

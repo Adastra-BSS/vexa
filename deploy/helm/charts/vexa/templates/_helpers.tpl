@@ -110,6 +110,28 @@ true
 {{- end -}}
 {{- end -}}
 
+{{/* One component's image reference, from its `image` map: {repository, tag, digest?}.
+
+Digest wins over tag when set, because they answer different questions. A tag says which build you
+ASKED for and can be re-pointed at another image afterwards; a digest says which build is actually
+running and cannot. A release that reports `:v012` tells an operator nothing about what is on the
+nodes, which is the whole problem with debugging a deployment from its manifest.
+
+Precedence, highest first: the component's own `digest`, then global.imageTag, then the component's
+`tag`. global.imageTag deliberately does NOT override a digest - pinning is the stronger statement,
+and a release-wide tag silently unpinning a pinned component is exactly the surprise to avoid.
+
+Call: {{ include "vexa.image" (list . .Values.meetingApi.image) }} */}}
+{{- define "vexa.image" -}}
+{{- $root := index . 0 -}}
+{{- $image := index . 1 -}}
+{{- if $image.digest -}}
+{{- printf "%s@%s" $image.repository $image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $image.repository ($root.Values.global.imageTag | default $image.tag) -}}
+{{- end -}}
+{{- end -}}
+
 {{/* The on-demand bot image the runtime spawns (BROWSER_IMAGE). The bot is published, never built by
 this chart. runtime.browserImage is the explicit value; global.imageTag (set) pins the standard repo. */}}
 {{- define "vexa.botImage" -}}
