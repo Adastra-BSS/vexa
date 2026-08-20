@@ -1,9 +1,9 @@
 # =============================================================================
 # Vexa Lite (v0.12) — single-container build + deploy
 # =============================================================================
-# `make lite` (from repo root) → this Makefile's `all`: provisions PostgreSQL + MinIO sidecar
+# `make lite` (from repo root) → this Makefile's `all`: provisions PostgreSQL + Azurite sidecar
 # containers, pulls/builds the all-in-one image, runs it on the host network with the process
-# backend, and verifies the front doors. The app image is lean; postgres/minio stay external.
+# backend, and verifies the front doors. The app image is lean; postgres/azurite stay external.
 .PHONY: all up down init-db test env preflight build push build-and-push set-latest set-dev setup-builder help stt-smoke
 
 # --- Paths ---
@@ -25,18 +25,20 @@ LAST_TAG_FILE  := $(ROOT)/deploy/lite/.last-tag
 
 # --- Network + sidecars + storage defaults ---
 # A user-defined bridge so the app's INTERNAL services live on the container's own loopback (no host
-# port collisions); only the front doors are published. postgres/minio join the same bridge and the
+# port collisions); only the front doors are published. postgres/azurite join the same bridge and the
 # app reaches them by container name. Override HOST_*_PORT to avoid conflicts on a busy host.
 NETWORK         ?= vexa-lite-net
 PG_CONTAINER    ?= vexa-lite-postgres
-MINIO_CONTAINER ?= vexa-lite-minio
+AZURITE_CONTAINER ?= vexa-lite-azurite
 APP_CONTAINER   ?= vexa-lite
 HOST_GATEWAY_PORT   ?= 8056
 HOST_TERMINAL_PORT  ?= 3001
 HOST_AGENT_PORT     ?= 8100
-MINIO_ACCESS_KEY ?= vexa-access-key
-MINIO_SECRET_KEY ?= vexa-secret-key
-MINIO_BUCKET     ?= vexa
+# Azurite's well-known DEVELOPMENT account: published by Microsoft, hardcoded in the emulator, and
+# useless against real Azure. It is not a credential.
+AZURITE_ACCOUNT_KEY ?= Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+AZURE_STORAGE_CONTAINER ?= vexa
+AZURE_STORAGE_CONNECTION_STRING ?= DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$(AZURITE_ACCOUNT_KEY);BlobEndpoint=http://$(AZURITE_CONTAINER):10000/devstoreaccount1;
 
 # --- Local CPU STT (LOCAL_STT=1) ---------------------------------------------------------------
 # Transcription in Vexa is always an external OpenAI-compatible /v1/audio/transcriptions service.
@@ -87,7 +89,7 @@ env:
 preflight:
 	@docker info > /dev/null 2>&1 || { echo "ERROR: Docker is not running."; exit 1; }
 
-## up — a bridge network, postgres + minio sidecars (by name), then the all-in-one container with
+## up — a bridge network, postgres + azurite sidecars (by name), then the all-in-one container with
 ## only the front doors published. Internal services live on the container's own loopback.
 ##
 ## The recipe is ONE `\`-continued shell command: a bare `#` line inside it (no trailing `\`) ends
@@ -136,17 +138,17 @@ up: preflight
 			postgres:17-alpine -c idle_in_transaction_session_timeout=60000 > /dev/null; \
 		for i in $$(seq 1 24); do docker exec $(PG_CONTAINER) pg_isready -U postgres -d vexa -q 2>/dev/null && break; sleep 2; done; \
 	fi; echo "  ✓ PostgreSQL ready"; \
-	echo "Starting MinIO ($(MINIO_CONTAINER))..."; \
-	if ! docker ps -q -f name=$(MINIO_CONTAINER) | grep -q .; then \
-		docker rm -f $(MINIO_CONTAINER) 2>/dev/null || true; \
-		docker run -d --name $(MINIO_CONTAINER) --network $(NETWORK) --restart unless-stopped \
-			-e MINIO_ROOT_USER=$(MINIO_ACCESS_KEY) -e MINIO_ROOT_PASSWORD=$(MINIO_SECRET_KEY) \
-			-v vexa-lite-miniodata:/data \
-			minio/minio:latest server /data --console-address ":9001" > /dev/null; \
+	echo "Starting Azurite ($(AZURITE_CONTAINER))..."; \
+	if ! docker ps -q -f name=$(AZURITE_CONTAINER) | grep -q .; then \
+		docker rm -f $(AZURITE_CONTAINER) 2>/dev/null || true; \
+		docker run -d --name $(AZURITE_CONTAINER) --network $(NETWORK) --restart unless-stopped \
+			-v vexa-lite-azuritedata:/data \
+			mcr.microsoft.com/azure-storage/azurite \
+			azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck --location /data > /dev/null; \
 	fi; \
-	echo "  Ensuring bucket $(MINIO_BUCKET) (waiting for MinIO, up to 120s)..."; \
-	docker run --rm --network $(NETWORK) --entrypoint sh minio/mc:latest -c 'set -e; for i in $$(seq 1 24); do if mc alias set vexa http://$(MINIO_CONTAINER):9000 $(MINIO_ACCESS_KEY) $(MINIO_SECRET_KEY) >/dev/null 2>&1 && mc admin info vexa >/dev/null 2>&1; then break; fi; sleep 5; done; mc alias set vexa http://$(MINIO_CONTAINER):9000 $(MINIO_ACCESS_KEY) $(MINIO_SECRET_KEY) >/dev/null; mc admin info vexa >/dev/null; mc mb --ignore-existing vexa/$(MINIO_BUCKET) >/dev/null; mc stat vexa/$(MINIO_BUCKET) >/dev/null'; \
-	echo "  ✓ MinIO ready — bucket $(MINIO_BUCKET) present"; \
+	echo "  Waiting for Azurite (up to 120s)..."; \
+	for i in $$(seq 1 24); do docker exec $(AZURITE_CONTAINER) nc -z localhost 10000 2>/dev/null && break; sleep 5; done; \
+	echo "  ✓ Azurite ready"; \
 	if [ -n "$(LOCAL_STT)" ]; then \
 		echo "Starting local CPU STT ($(WHISPER_CONTAINER), $(WHISPER_MODEL))..."; \
 		if ! docker ps -q -f name=$(WHISPER_CONTAINER) | grep -q .; then \
@@ -169,14 +171,19 @@ up: preflight
 		-e DB_HOST=$(PG_CONTAINER) -e DB_PORT=5432 -e DB_NAME=vexa -e DB_USER=postgres -e DB_PASSWORD=postgres \
 		-e ADMIN_API_TOKEN="$$ADMIN_TK" -e ADMIN_TOKEN="$$ADMIN_TK" \
 		-e TRANSCRIPTION_SERVICE_URL="$$TX_URL" -e TRANSCRIPTION_SERVICE_TOKEN="$$TX_TOKEN" \
-		-e MINIO_ENDPOINT=$(MINIO_CONTAINER):9000 -e MINIO_ACCESS_KEY=$(MINIO_ACCESS_KEY) \
-		-e MINIO_SECRET_KEY=$(MINIO_SECRET_KEY) -e MINIO_BUCKET=$(MINIO_BUCKET) -e MINIO_SECURE=false \
+		-e STORAGE_BACKEND=azure \
+		-e AZURE_STORAGE_CONNECTION_STRING='$(AZURE_STORAGE_CONNECTION_STRING)' \
+		-e AZURE_STORAGE_CONTAINER=$(AZURE_STORAGE_CONTAINER) \
 		-e VEXA_PUBLIC_API_URL=http://localhost:$(HOST_GATEWAY_PORT) \
 		-e TERMINAL_PUBLIC_URL=http://localhost:$(HOST_TERMINAL_PORT) \
 		$$CLAUDE_MOUNT \
 		"$$IMG" > /dev/null; \
 	echo "  Waiting for the gateway (up to 3 min)..."; \
 	for i in $$(seq 1 36); do curl -sf -o /dev/null http://localhost:$(HOST_GATEWAY_PORT)/health 2>/dev/null && break; sleep 5; done; \
+	echo "  Ensuring container $(AZURE_STORAGE_CONTAINER)..."; \
+	docker exec -e PYTHONPATH=/app/meeting-api/src $(APP_CONTAINER) \
+		/opt/venvs/meeting/bin/python -m meeting_api.recordings.ensure_container >/dev/null; \
+	echo "  ✓ container $(AZURE_STORAGE_CONTAINER) present"; \
 	echo "  ✓ Vexa Lite running"
 
 ## init-db — schema converges on each service's startup (admin/meeting ensure_schema); no-op hook.
@@ -191,10 +198,10 @@ test:
 			echo "  ✓ $$NAME (:$$PORT)"; else echo "  ✗ $$NAME not responding (:$$PORT)"; FAIL=1; fi; \
 	done; exit $$FAIL
 
-## down — stop + remove app + sidecars + network (volumes persist; `docker volume rm vexa-lite-pgdata vexa-lite-miniodata` to wipe).
+## down — stop + remove app + sidecars + network (volumes persist; `docker volume rm vexa-lite-pgdata vexa-lite-azuritedata` to wipe).
 down:
 	@echo "Stopping Vexa Lite..."
-	@docker rm -f $(APP_CONTAINER) $(PG_CONTAINER) $(MINIO_CONTAINER) $(WHISPER_CONTAINER) 2>/dev/null || true
+	@docker rm -f $(APP_CONTAINER) $(PG_CONTAINER) $(AZURITE_CONTAINER) $(WHISPER_CONTAINER) 2>/dev/null || true
 	@docker network rm $(NETWORK) 2>/dev/null || true
 	@echo "  ✓ Stopped (data volumes kept)"
 

@@ -39,7 +39,7 @@ stack-test-bot:
 	COMPOSE_BOT=1 ./bin/stack-test
 
 ## stack-test-stress — the control plane under CONCURRENT load (A:V2): N mock bots at once, no cap overspill.
-## Needs mock-bot:dev. Tune STRESS_N / STRESS_CAP. Pass COMPOSE_PROJECT + MINIO_HOST_PORT to isolate on a shared dev host.
+## Needs mock-bot:dev. Tune STRESS_N / STRESS_CAP. Pass COMPOSE_PROJECT + AZURITE_HOST_PORT to isolate on a shared dev host.
 stack-test-stress:
 	COMPOSE_STRESS=1 MOCK_BOT=1 BROWSER_IMAGE=$(BROWSER_IMAGE) ./bin/stack-test
 

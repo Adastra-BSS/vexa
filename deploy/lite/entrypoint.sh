@@ -125,7 +125,12 @@ echo "Configuration:"
 echo "  - Redis URL:        ${REDIS_URL}"
 echo "  - Database:         postgresql+asyncpg://${DB_USER}:***@${DB_HOST}:${DB_PORT}/${DB_NAME}"
 echo "  - Transcription:    ${TRANSCRIPTION_SERVICE_URL:-NOT SET (bots capture, no transcript)}"
-echo "  - Object storage:   ${MINIO_ENDPOINT:-NOT SET (recordings disabled)}"
+if [ "$STORAGE_BACKEND" = "azure" ]; then
+    # Never echo the connection string itself - it carries the account key.
+    echo "  - Object storage:   azure blob, container ${AZURE_STORAGE_CONTAINER}${AZURE_STORAGE_CONNECTION_STRING:+ (connection string set)}"
+else
+    echo "  - Object storage:   ${MINIO_ENDPOINT:-NOT SET (recordings disabled)}"
+fi
 echo "  - Log level:        ${LOG_LEVEL}"
 echo ""
 

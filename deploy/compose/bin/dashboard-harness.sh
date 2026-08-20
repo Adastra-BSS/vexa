@@ -18,9 +18,9 @@ if ! docker info >/dev/null 2>&1; then echo "  ↳ dashboard-harness — docker 
 PROJ="${COMPOSE_PROJECT:-vexa-dash}"
 ADMIN="${ADMIN_TOKEN:-gate-admin-token}"
 export IMAGE_TAG=dev COMPOSE_PROJECT_NAME="$PROJ" ADMIN_TOKEN="$ADMIN" \
-       INTERNAL_API_SECRET="${INTERNAL_API_SECRET:-gate-internal-secret}" MINIO_BUCKET=vexa \
+       INTERNAL_API_SECRET="${INTERNAL_API_SECRET:-gate-internal-secret}" AZURE_STORAGE_CONTAINER=vexa \
        BROWSER_IMAGE="${BROWSER_IMAGE:-mock-bot:dev}" DOCKER_GID="${DOCKER_GID:-0}" \
-       MINIO_HOST_PORT="${MINIO_HOST_PORT:-19000}"
+       AZURITE_HOST_PORT="${AZURITE_HOST_PORT:-11000}"
 DC=(docker compose -p "$PROJ" -f docker-compose.yml -f docker-compose.dashboard.yml)
 
 cleanup() {
@@ -30,7 +30,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[harness] control-plane up (BROWSER_IMAGE=$BROWSER_IMAGE) …"
-"${DC[@]}" up -d gateway meeting-api runtime admin-api postgres redis minio minio-init >/dev/null
+"${DC[@]}" up -d gateway meeting-api runtime admin-api postgres redis azurite azurite-init >/dev/null
 until curl -sf localhost:18080/health >/dev/null 2>&1 && curl -sf localhost:18056/health >/dev/null 2>&1; do sleep 2; done
 echo "[harness] stack healthy"
 

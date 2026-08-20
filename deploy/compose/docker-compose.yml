@@ -1,6 +1,6 @@
 name: vexa-v012
 # v0.12 control plane (P4). The carved analog of deploy/compose/docker-compose.yml (0.11):
-# postgres:17 + valkey:8 + minio + minio-init infra, then the four long-running Python services —
+# postgres:17 + valkey:8 + azurite + azurite-init infra, then the four long-running Python services —
 # admin-api · runtime · meeting-api · gateway — each building its own slim uv-based image.
 # Improvement over 0.11: EVERY service carries a healthcheck and depends_on waits on
 # `condition: service_healthy` so the bring-up is ordered + observable.
@@ -49,42 +49,52 @@ services:
     networks: [vexa]
     restart: unless-stopped
 
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-vexa-access-key}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-vexa-secret-key}
+  # The recordings object store. Azurite is Microsoft's Azure Blob emulator, so this stack exercises
+  # the same STORAGE_BACKEND=azure path a cloud deployment runs rather than a different one.
+  #
+  # --skipApiVersionCheck is not optional: the emulator whitelists the storage REST API versions it
+  # knows and the SDK negotiates the newest it ships with, so a current azure-storage-blob against a
+  # current Azurite answers InvalidHeaderValue on the first request. Real Azure serves that version -
+  # the lag is the emulator's, so skipping the check is the accurate stand-in, not a workaround.
+  #
+  # STORAGE_BACKEND=minio remains fully supported by the code: point MINIO_*/S3_* at any
+  # S3-compatible store and set STORAGE_BACKEND=minio, and this service is simply unused.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--skipApiVersionCheck", "--location", "/data"]
     ports:
-      - "127.0.0.1:${MINIO_HOST_PORT:-9000}:9000"
-      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+      - "127.0.0.1:${AZURITE_HOST_PORT:-10000}:10000"
     healthcheck:
-      test: ["CMD-SHELL", "mc ready local || curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
       interval: 5s
       timeout: 5s
       retries: 5
     volumes:
-      - minio-data:/data
+      - azurite-data:/data
     networks: [vexa]
     restart: unless-stopped
 
-  minio-init:
-    image: minio/mc:latest
+  # The container is never auto-created - on real Azure that is deliberate (the container is
+  # infrastructure, and the retention policy lives on it), so the emulator has to be given one too.
+  # Without it every recording upload fails with ContainerNotFound and the bot's audio is silently
+  # dropped after its flush timeout.
+  #
+  # It runs the meeting-api image on purpose: ensure_container is that service's own module, reading
+  # the SAME env the storage adapters read, so this cannot drift from where recordings actually go -
+  # and it costs no extra image pull, unlike an az-cli or mc container.
+  azurite-init:
+    image: vexaai/v012-meeting-api:${IMAGE_TAG:-dev}
+    build:
+      context: ../..
+      dockerfile: core/meetings/services/meeting-api/Dockerfile
     depends_on:
-      minio:
+      azurite:
         condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        mc alias set vexa http://minio:9000 $${MINIO_ROOT_USER:-vexa-access-key} $${MINIO_ROOT_PASSWORD:-vexa-secret-key}
-        mc mb --ignore-existing vexa/${MINIO_BUCKET:-vexa}
-        mc stat vexa/${MINIO_BUCKET:-vexa} >/dev/null
-        echo "bucket ${MINIO_BUCKET:-vexa} ensured"
+    entrypoint: ["python", "-m", "meeting_api.recordings.ensure_container"]
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-vexa-access-key}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-vexa-secret-key}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-azure}
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING:-DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-vexa}
     networks: [vexa]
 
   # ─── Core services ────────────────────────────────────────────────────────────────────────────
@@ -344,16 +354,21 @@ services:
       - VEXA_SYSTEM_WEBHOOK_TIMEOUT_S=${VEXA_SYSTEM_WEBHOOK_TIMEOUT_S:-10}
       # Self-hosted Jitsi hostnames (comma-separated) recognized in pasted + calendar links.
       - VEXA_JITSI_HOSTS=${VEXA_JITSI_HOSTS:-}
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      # Only read under STORAGE_BACKEND=minio, and no longer defaulted to a service name: this
+      # stack ships no MinIO, so an S3 deployment supplies its own reachable endpoint.
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-vexa-access-key}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-vexa-secret-key}
       - MINIO_BUCKET=${MINIO_BUCKET:-vexa}
       - MINIO_SECURE=${MINIO_SECURE:-false}
-      # Which object store recordings land in. `minio` (default) is the stock compose deployment;
-      # `azure` writes to an Azure Blob container instead and needs the connection string below. The
-      # same var is stamped into each recording's storage_backend JSONB field.
-      - STORAGE_BACKEND=${STORAGE_BACKEND:-minio}
-      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING:-}
+      # Which object store recordings land in. `azure` (default) is the stock compose deployment,
+      # backed by the Azurite service above; `minio` points the S3 adapter at the MINIO_*/S3_* keys
+      # for any S3-compatible store you bring yourself. The same var is stamped into each
+      # recording's storage_backend JSONB field.
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-azure}
+      # Azurite's well-known DEVELOPMENT account - published by Microsoft, hardcoded in the emulator,
+      # and useless against real Azure. It is not a credential. A real deployment overrides this.
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING:-DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;}
       - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-vexa}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
@@ -370,7 +385,7 @@ services:
         condition: service_healthy
       runtime:
         condition: service_healthy
-      minio-init:
+      azurite-init:
         condition: service_completed_successfully
     networks: [vexa]
     restart: unless-stopped
@@ -603,7 +618,7 @@ services:
 volumes:
   redis-data:
   postgres-data:
-  minio-data:
+  azurite-data:
   agent-workspaces:
 
 networks:

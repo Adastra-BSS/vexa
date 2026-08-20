@@ -1,7 +1,7 @@
 # deploy/compose — the v0.12 control-plane stack (P4)
 
 `docker-compose.yml` brings up the v0.12 control plane: the infra (`postgres:17-alpine`,
-`valkey/valkey:8-alpine`, `minio` + `minio-init`) and the long-running services below, each building its own
+`valkey/valkey:8-alpine`, `azurite` + `azurite-init`) and the long-running services below, each building its own
 slim image from `<service>/Dockerfile`:
 
 | service      | build context                          | host port | entrypoint                         |
@@ -33,7 +33,7 @@ docker compose -f deploy/compose/docker-compose.yml down -v
 ```
 
 `.env.example` documents every variable (faithful to the 0.11 `deploy/compose` names: `DB_*`,
-`REDIS_URL`, `ADMIN_TOKEN`, `INTERNAL_API_SECRET`, `MINIO_*`, `BROWSER_IMAGE`/`AGENT_IMAGE`,
+`REDIS_URL`, `ADMIN_TOKEN`, `INTERNAL_API_SECRET`, `STORAGE_BACKEND`/`AZURE_STORAGE_*`, `BROWSER_IMAGE`/`AGENT_IMAGE`,
 `DOCKER_GID`, `*_HOST_PORT`).
 
 ## Smoke probe — "is this install actually working?"

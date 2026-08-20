@@ -57,8 +57,7 @@ AGENT_API_HOST_PORT = _host_port("AGENT_API_PORT", "18100")
 TERMINAL_HOST_PORT = _host_port("TERMINAL_PORT", "13000")
 MCP_HOST_PORT = _host_port("MCP_HOST_PORT", "18010")
 POSTGRES_HOST_PORT = _host_port("POSTGRES_HOST_PORT", "5458")
-MINIO_HOST_PORT = _host_port("MINIO_HOST_PORT", "9000")
-MINIO_CONSOLE_HOST_PORT = _host_port("MINIO_CONSOLE_HOST_PORT", "9001")
+AZURITE_HOST_PORT = _host_port("AZURITE_HOST_PORT", "10000")
 GATEWAY_URL = f"http://127.0.0.1:{GATEWAY_PORT}"
 ADMIN_API_URL = f"http://127.0.0.1:{ADMIN_API_HOST_PORT}"
 MEETING_API_URL = f"http://127.0.0.1:{MEETING_API_HOST_PORT}"
@@ -67,10 +66,10 @@ RUNTIME_URL = f"http://127.0.0.1:{RUNTIME_HOST_PORT}"
 # Env the stack boots with — pinned so the test knows the secrets it must present.
 ADMIN_TOKEN = "gate-admin-token"
 INTERNAL_API_SECRET = "gate-internal-secret"
-MINIO_BUCKET = "vexa"
+RECORDING_CONTAINER = "vexa"
 
-SERVICES = ["redis", "postgres", "minio", "admin-api", "runtime", "meeting-api", "gateway"]
-HEALTHCHECKED = ["redis", "postgres", "minio", "admin-api", "runtime", "meeting-api", "gateway"]
+SERVICES = ["redis", "postgres", "azurite", "admin-api", "runtime", "meeting-api", "gateway"]
+HEALTHCHECKED = ["redis", "postgres", "azurite", "admin-api", "runtime", "meeting-api", "gateway"]
 
 
 def docker_available() -> bool:
@@ -132,7 +131,7 @@ def _stack_env() -> dict:
         "COMPOSE_PROJECT_NAME": PROJECT,
         "ADMIN_TOKEN": ADMIN_TOKEN,
         "INTERNAL_API_SECRET": INTERNAL_API_SECRET,
-        "MINIO_BUCKET": MINIO_BUCKET,
+        "AZURE_STORAGE_CONTAINER": RECORDING_CONTAINER,
         "BROWSER_IMAGE": os.getenv("BROWSER_IMAGE", "vexaai/vexa-bot:v012"),
         "API_GATEWAY_HOST_PORT": GATEWAY_PORT,
         "ADMIN_API_PORT": ADMIN_API_HOST_PORT,
@@ -144,8 +143,7 @@ def _stack_env() -> dict:
         # deploy/compose/.env (a developer's live stack) and collides with its running ports
         "MCP_HOST_PORT": MCP_HOST_PORT,
         "POSTGRES_HOST_PORT": POSTGRES_HOST_PORT,
-        "MINIO_HOST_PORT": MINIO_HOST_PORT,
-        "MINIO_CONSOLE_HOST_PORT": MINIO_CONSOLE_HOST_PORT,
+        "AZURITE_HOST_PORT": AZURITE_HOST_PORT,
         # Docker-Desktop / Linux root socket → group 0 is fine for the mounted socket.
         "DOCKER_GID": os.getenv("DOCKER_GID", "0"),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "info"),
@@ -202,7 +200,7 @@ class Stack:
     runtime: str = RUNTIME_URL
     admin_token: str = ADMIN_TOKEN
     internal_secret: str = INTERNAL_API_SECRET
-    bucket: str = MINIO_BUCKET
+    bucket: str = RECORDING_CONTAINER
 
     # ---- exec helpers (the docker CLI is our DB + S3 probe; no extra client deps) ----
     def exec(self, service: str, *cmd: str, check: bool = True) -> str:
@@ -217,18 +215,22 @@ class Stack:
         rows = [ln for ln in raw.splitlines() if ln and not ln.startswith(tag)]
         return "\n".join(rows).strip()
 
-    def minio_ls(self, prefix: str) -> list[str]:
-        """List minio object keys under a prefix via the mc client baked into the minio image."""
-        # alias is set lazily; ignore the error if it already exists.
-        self.exec("minio", "mc", "alias", "set", "local", "http://localhost:9000",
-                  "vexa-access-key", "vexa-secret-key", check=False)
-        out = self.exec("minio", "mc", "ls", "--recursive", f"local/{self.bucket}/{prefix}", check=False)
-        keys = []
-        for line in out.splitlines():
-            parts = line.split()
-            if parts:
-                keys.append(parts[-1])
-        return keys
+    def blob_ls(self, prefix: str) -> list[str]:
+        """List recording blob keys under a prefix.
+
+        Run from the meeting-api container rather than the store's own: Azurite ships no client at
+        all, and meeting-api already has the azure-storage-blob the app uploads with — so this reads
+        the objects through the same SDK that wrote them, and needs no extra image or client dep.
+        """
+        out = self.exec("meeting-api", "python", "-c", (
+            "import os\n"
+            "from azure.storage.blob import BlobServiceClient\n"
+            "c = BlobServiceClient.from_connection_string(\n"
+            "    os.environ['AZURE_STORAGE_CONNECTION_STRING']\n"
+            f").get_container_client('{self.bucket}')\n"
+            f"print('\\n'.join(b.name for b in c.list_blobs(name_starts_with='{prefix}')))"
+        ), check=False)
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
 
     def redis_cli(self, *args: str) -> str:
         return self.exec("redis", "redis-cli", *args, check=False)
@@ -247,7 +249,7 @@ def _wait_healthy(deadline: float, poll: float = 3.0) -> dict[str, str]:
     last: dict[str, str] = {}
     while time.time() < deadline:
         last = _service_health(PROJECT)
-        # minio-init is a one-shot — it exits 0 and disappears; don't require it here.
+        # azurite-init is a one-shot — it exits 0 and disappears; don't require it here.
         relevant = {s: last.get(s, "missing") for s in HEALTHCHECKED}
         if all(v == "healthy" for v in relevant.values()):
             return relevant
