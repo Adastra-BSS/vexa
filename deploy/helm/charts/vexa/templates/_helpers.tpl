@@ -96,6 +96,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{/* Whether this release deploys its own in-cluster MinIO.
+
+`minio.enabled` alone was never the whole question: recordings are the store's only mandatory
+consumer, and meetingApi.storageBackend decides where they go. With storageBackend=azure the chart
+used to keep rendering a StatefulSet, a Service, a PVC and an init Job that nothing reads - an
+operator had to know to flip a second, unrelated-looking switch. So the backend answer gates the
+deployment, and `minio.enabled` stays the explicit opt-out on top of it: leave it true with a
+non-minio backend and you still get no store, set it false and you never do. */}}
+{{- define "vexa.minioEnabled" -}}
+{{- if and .Values.minio.enabled (eq (.Values.meetingApi.storageBackend | default "minio") "minio") -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{/* The on-demand bot image the runtime spawns (BROWSER_IMAGE). The bot is published, never built by
 this chart. runtime.browserImage is the explicit value; global.imageTag (set) pins the standard repo. */}}
 {{- define "vexa.botImage" -}}

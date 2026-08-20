@@ -1,4 +1,4 @@
-{{- if .Values.minio.enabled }}
+{{- if (include "vexa.minioEnabled" .) }}
 apiVersion: v1
 kind: Service
 metadata:

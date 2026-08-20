@@ -1,4 +1,4 @@
-{{- if .Values.minio.enabled }}
+{{- if (include "vexa.minioEnabled" .) }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

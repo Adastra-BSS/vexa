@@ -203,4 +203,64 @@ else
   echo "  FAIL: migrations Job ignored global.imageTag — schema/code skew risk (#900): $MIG_IMG"; fail=1
 fi
 
+# #37 — storageBackend=azure means the recordings store is OUTSIDE the cluster, so the chart must
+# stop rendering MinIO entirely rather than leave a StatefulSet, Service, PVC and init Job that
+# nothing reads. Note minio.enabled is left at its DEFAULT true here: the backend answer alone has
+# to be sufficient, or an operator has to know to flip a second, unrelated-looking switch.
+RENDER_AZ="$(helm template vexa "$CHART" -n vexa -f "$CHART/values-test.yaml" \
+  --set meetingApi.storageBackend=azure \
+  --set secrets.azureStorageConnectionString='DefaultEndpointsProtocol=https;AccountName=a;AccountKey=SECRETKEY123')"
+if grep -qE 'app.kubernetes.io/component: minio|component: minio' <<< "$RENDER_AZ"; then
+  echo "  FAIL: minio resources rendered under storageBackend=azure"; fail=1
+else
+  echo "  OK: storageBackend=azure renders no minio resources"
+fi
+az_st="$(grep -cE '^kind: StatefulSet' <<< "$RENDER_AZ" || true)"
+if [ "$az_st" -eq 1 ]; then
+  echo "  OK: only postgres StatefulSet remains under azure ($az_st)"
+else
+  echo "  FAIL: expected 1 StatefulSet under azure (postgres), got $az_st"; fail=1
+fi
+if grep -qE '^kind: Job' <<< "$RENDER_AZ"; then
+  echo "  FAIL: minio-init Job rendered under storageBackend=azure"; fail=1
+else
+  echo "  OK: no minio-init Job under storageBackend=azure"
+fi
+# The default (minio) render is unchanged — the gate is additive, not a silent removal.
+if grep -qE 'app.kubernetes.io/component: minio|component: minio' <<< "$RENDER"; then
+  echo "  OK: default storageBackend=minio still renders the in-cluster store"
+else
+  echo "  FAIL: default render lost its minio resources"; fail=1
+fi
+
+# The connection string carries an account key, so it must reach the pod through the Secret and
+# NEVER as a plaintext env value on the Deployment — `kubectl get deploy -o yaml` is a far wider
+# read than the Secret. Assert the key material appears nowhere in the meeting-api Deployment.
+MA_AZ="$(helm template vexa "$CHART" -n vexa -f "$CHART/values-test.yaml" \
+  --set meetingApi.storageBackend=azure \
+  --set secrets.azureStorageConnectionString='DefaultEndpointsProtocol=https;AccountName=a;AccountKey=SECRETKEY123' \
+  --show-only templates/deployment-meeting-api.yaml)"
+if grep -q 'SECRETKEY123' <<< "$MA_AZ"; then
+  echo "  FAIL: azure connection string rendered PLAINTEXT into the meeting-api Deployment"; fail=1
+else
+  echo "  OK: azure connection string absent from the Deployment (secretKeyRef only)"
+fi
+if grep -q 'key: AZURE_STORAGE_CONNECTION_STRING' <<< "$MA_AZ"; then
+  echo "  OK: meeting-api reads AZURE_STORAGE_CONNECTION_STRING via secretKeyRef"
+else
+  echo "  FAIL: meeting-api has no secretKeyRef for AZURE_STORAGE_CONNECTION_STRING"; fail=1
+fi
+if grep -qE '^  AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=https;AccountName=a;AccountKey=SECRETKEY123"' <<< "$RENDER_AZ"; then
+  echo "  OK: connection string lands in the chart Secret when set"
+else
+  echo "  FAIL: connection string missing from the chart Secret when set"; fail=1
+fi
+# Unset (the default minio deployment) → the Secret must not carry an empty key at all, and the
+# optional secretKeyRef keeps the render valid.
+if grep -qE '^  AZURE_STORAGE_CONNECTION_STRING:' <<< "$RENDER"; then
+  echo "  FAIL: AZURE_STORAGE_CONNECTION_STRING in the Secret with no value set"; fail=1
+else
+  echo "  OK: Secret omits AZURE_STORAGE_CONNECTION_STRING when unset"
+fi
+
 [ "$fail" -eq 0 ] && { echo "gate:helm PASS"; exit 0; } || { echo "gate:helm FAIL"; exit 1; }

@@ -114,7 +114,7 @@ spec:
               value: {{ .Values.meetingApi.systemWebhookAllowPrivateHttp | default "false" | quote }}
             - name: VEXA_SYSTEM_WEBHOOK_TIMEOUT_S
               value: {{ .Values.meetingApi.systemWebhookTimeoutSeconds | default "10" | quote }}
-            {{- if .Values.minio.enabled }}
+            {{- if (include "vexa.minioEnabled" .) }}
             - name: MINIO_ENDPOINT
               value: "{{ include "vexa.componentName" (list . "minio") }}:{{ .Values.minio.service.port }}"
             - name: MINIO_ACCESS_KEY
@@ -126,13 +126,21 @@ spec:
             {{- end }}
             - name: MINIO_SECURE
               value: {{ .Values.meetingApi.minioSecure | default "false" | quote }}
-            # Which object store recordings land in — OUTSIDE the minio.enabled gate (like
-            # MINIO_SECURE above), because `azure` is exactly the case where no in-cluster minio is
-            # deployed. The same var is stamped into each recording's storage_backend JSONB field.
+            # Which object store recordings land in — OUTSIDE the minio gate (like MINIO_SECURE
+            # above), because `azure` is exactly the case where no in-cluster minio is deployed. The
+            # same var is stamped into each recording's storage_backend JSONB field.
             - name: STORAGE_BACKEND
               value: {{ .Values.meetingApi.storageBackend | default "minio" | quote }}
+            # The connection string carries an account key: it rides the chart Secret, never a
+            # plaintext env value on the Deployment (`kubectl get deploy -o yaml` is a far wider
+            # read than the Secret, and the config contract marks the key secret: true). optional
+            # so the default minio deployment renders without one.
             - name: AZURE_STORAGE_CONNECTION_STRING
-              value: {{ .Values.meetingApi.azureStorageConnectionString | default "" | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.adminTokenSecretName" . }}
+                  key: AZURE_STORAGE_CONNECTION_STRING
+                  optional: true
             - name: AZURE_STORAGE_CONTAINER
               value: {{ .Values.meetingApi.azureStorageContainer | default "vexa" | quote }}
             - name: LOG_LEVEL

@@ -1,4 +1,4 @@
-{{- if .Values.minio.enabled }}
+{{- if (include "vexa.minioEnabled" .) }}
 apiVersion: batch/v1
 kind: Job
 metadata:

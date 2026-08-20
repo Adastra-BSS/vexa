@@ -56,6 +56,7 @@ secrets:
   dispatchSigningKey: ""            # agent-api signs per-dispatch tokens (default dev key; k8s prod → set this)
   botApiKey: ""                     # agent-api → gateway "add bot from URL" key (optional)
   nextauthSecret: ""                # terminal next-auth session signing (default dev key; set in prod)
+  azureStorageConnectionString: ""  # Azure Blob account key/SAS; required when meetingApi.storageBackend=azure
   # Model-provider auth (config.v1 `model_inference` capability, ADR-0026). ANTHROPIC_AUTH_TOKEN +
   # ANTHROPIC_BASE_URL are the OpenRouter/subscription pair (compose sources them from .env as a
   # single source of truth — here they live in the Secret). claudeCodeOauthToken
@@ -206,11 +207,11 @@ meetingApi:
   botS3SecretKey: ""
   minioSecure: "false"
   # Where recordings are written. "minio" (default) uses the in-cluster store this chart deploys;
-  # "azure" writes to an Azure Blob container instead — set azureStorageConnectionString with it (the
-  # meeting-api refuses to boot on azure without one) and you can then run with minio.enabled=false.
-  # The container must already exist; the adapter never creates it.
+  # "azure" writes to an Azure Blob container instead, and the chart then stops rendering MinIO at
+  # all (StatefulSet, Service, PVC and init Job) without you touching minio.enabled. Set the
+  # matching secrets.azureStorageConnectionString — meeting-api refuses to boot on azure without
+  # one. The container must already exist; the adapter never creates it.
   storageBackend: "minio"
-  azureStorageConnectionString: ""
   azureStorageContainer: "vexa"
   logLevel: "info"
   resources:
