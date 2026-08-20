@@ -105,7 +105,7 @@ def build_production_app():
     from .db import build_engine
     from .bot_spawn.adapters import HttpRuntimeClient, SqlAlchemyMeetingRepo
     from .collector.adapters import RedisStreamBus, SqlAlchemyTranscriptStore
-    from .recordings.adapters import S3Storage, SqlAlchemyRecordingRepo
+    from .recordings.adapters import SqlAlchemyRecordingRepo, build_storage_from_env
 
     database_url = _database_url()
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -141,12 +141,7 @@ def build_production_app():
     service_authority = build_service_authority_from_env()
 
     recording_repo = SqlAlchemyRecordingRepo(session_factory)
-    storage = S3Storage(
-        bucket=os.getenv("MINIO_BUCKET", os.getenv("RECORDING_BUCKET", "vexa")),
-        endpoint_url=os.getenv("S3_ENDPOINT") or _minio_endpoint_url(),
-        access_key=os.getenv("S3_ACCESS_KEY") or os.getenv("MINIO_ACCESS_KEY"),
-        secret_key=os.getenv("S3_SECRET_KEY") or os.getenv("MINIO_SECRET_KEY"),
-    )
+    storage = build_storage_from_env()  # STORAGE_BACKEND: minio (default) | azure
 
     # Per-user webhook delivery (WebhookSink: SSRF-guard → event-filter → sign → POST → enqueue-retry).
     # httpx transport; failures route to the redis RetryQueue the background drain loop sweeps.
@@ -252,15 +247,6 @@ def build_production_app():
         storage=storage,
     )
     return app
-
-
-def _minio_endpoint_url() -> str:
-    """Build an http(s) MinIO URL from MINIO_ENDPOINT (host:port) + MINIO_SECURE, mirroring 0.11."""
-    endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
-    if endpoint.startswith("http://") or endpoint.startswith("https://"):
-        return endpoint
-    scheme = "https" if os.getenv("MINIO_SECURE", "false").lower() == "true" else "http"
-    return f"{scheme}://{endpoint}"
 
 
 def _attach_background_loops(

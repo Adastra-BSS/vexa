@@ -1,16 +1,22 @@
-"""Production adapters — the real ``Storage`` (MinIO/S3) + ``RecordingRepo`` (SQLAlchemy).
+"""Production adapters — the real ``Storage`` (MinIO/S3 · Azure Blob) + ``RecordingRepo`` (SQLAlchemy).
 
 Thin translations of the ports to the concrete clients, as the parent's
 ``recordings.internal_upload_recording`` (storage upload + the ``SELECT ... FOR UPDATE`` row lock on
 ``meeting.data``) and ``recording_finalizer`` (master build + upload) do. They carry NO test logic.
 
-Heavy imports (boto3/minio, SQLAlchemy) are LAZY (inside the methods / ``build_production_router``)
-so the package imports + unit-tests with the in-memory fakes without those runtime deps in the gate
-venv — which is why ``pyproject.toml`` needs no extra pins.
+``build_storage_from_env`` is the ONE seam that picks a storage backend from ``STORAGE_BACKEND``;
+every entry point (``__main__`` and ``build_production_router``) goes through it, so a deployment's
+storage cannot depend on which entry point booted it.
+
+Heavy imports (boto3, azure-storage-blob, SQLAlchemy) are LAZY (inside the methods / the builders) so
+the package imports + unit-tests with the in-memory fakes without those runtime deps in the gate venv
+— which is why ``pyproject.toml`` needs no extra pins. It also means a MinIO deployment never has to
+install the azure SDK, and vice versa: the factory RESOLVES a backend without constructing a client.
 """
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from typing import Optional
 
 
@@ -128,6 +134,176 @@ class S3Storage:
 
     async def delete(self, key: str) -> None:
         await self._run(self._c().delete_object, Bucket=self._bucket, Key=key)
+
+
+class AzureBlobStorage:
+    """``Storage`` over an Azure Blob container. Lazy client so the package imports without
+    azure-storage-blob (a MinIO deployment never installs it).
+
+    The SYNCHRONOUS SDK, offloaded through the same ``_run`` seam as ``S3Storage`` — not the ``.aio``
+    variant. The sync client keeps ONE thread-offload story for both backends (so ``_c()`` stays
+    stubbable in a plain unit test), needs no aiohttp, and has no async close to thread through the
+    app lifespan. Blob I/O here is a handful of large calls per recording, not a high-QPS path, so a
+    thread pool is the right shape.
+
+    Paging matters: ``list_blobs`` returns a LAZY ``ItemPaged`` that fetches each page over the
+    network as it is consumed, so both listing methods drain it INSIDE the worker thread. Returning
+    the iterator and looping on the event loop would put the per-page round-trips right back on the
+    loop the offload exists to protect.
+    """
+
+    def __init__(self, *, container: str, connection_string: str):
+        self._container = container
+        self._conn = connection_string
+        self._client = None
+
+    def _c(self):
+        if self._client is None:
+            from azure.storage.blob import BlobServiceClient
+
+            self._client = BlobServiceClient.from_connection_string(
+                self._conn
+            ).get_container_client(self._container)
+        return self._client
+
+    async def _run(self, fn, *args, **kwargs):
+        """Run a BLOCKING azure-sdk call off the event loop (G4) — see ``S3Storage._run`` for why.
+        Overridable in tests."""
+        import asyncio
+
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def upload(self, key: str, data: bytes, *, content_type: str) -> None:
+        from azure.storage.blob import ContentSettings
+
+        # overwrite=True: a real container answers 409 BlobAlreadyExists by default, and the bot
+        # legitimately re-uploads a chunk it is not sure landed.
+        await self._run(
+            self._c().upload_blob, name=key, data=data, overwrite=True,
+            content_settings=ContentSettings(content_type=content_type),
+        )
+
+    async def list(self, prefix: str) -> list[str]:
+        def _list() -> list[str]:
+            return sorted(b.name for b in self._c().list_blobs(name_starts_with=prefix))
+
+        return await self._run(_list)
+
+    async def list_detailed(self, prefix: str) -> list[dict]:
+        """Key + size + mtime per blob, all from the ONE listing response (see the port's rationale)."""
+        def _list() -> list[dict]:
+            out = []
+            for b in self._c().list_blobs(name_starts_with=prefix):
+                lm = b.last_modified
+                out.append({
+                    "key": b.name,
+                    "size": int(b.size or 0),
+                    # The SDK hands back a tz-aware datetime; normalize to epoch seconds so the
+                    # janitor's ordering never depends on a backend's datetime flavour.
+                    "last_modified": lm.timestamp() if lm is not None else 0.0,
+                })
+            return sorted(out, key=lambda o: o["key"])
+
+        return await self._run(_list)
+
+    async def get(self, key: str) -> bytes:
+        def _get() -> bytes:
+            with _as_key_error(key):
+                return self._c().download_blob(key).readall()
+
+        return await self._run(_get)
+
+    async def get_range(self, key: str, start: int, end: int) -> bytes:
+        # The port is INCLUSIVE [start, end]; the SDK takes offset + length.
+        def _get() -> bytes:
+            with _as_key_error(key):
+                return self._c().download_blob(key, offset=start, length=end - start + 1).readall()
+
+        return await self._run(_get)
+
+    async def size(self, key: str) -> int:
+        def _size() -> int:
+            with _as_key_error(key):
+                return int(self._c().get_blob_client(key).get_blob_properties().size)
+
+        return await self._run(_size)
+
+    async def exists(self, key: str) -> bool:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        def _exists() -> bool:
+            try:
+                self._c().get_blob_client(key).get_blob_properties()
+                return True
+            except ResourceNotFoundError:
+                return False
+
+        return await self._run(_exists)
+
+    async def delete(self, key: str) -> None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        def _delete() -> None:
+            try:
+                self._c().delete_blob(key)
+            except ResourceNotFoundError:
+                pass  # idempotent per the port; the janitor's sweeps race other replicas (#637)
+
+        await self._run(_delete)
+
+
+@contextmanager
+def _as_key_error(key: str):
+    """Translate the azure SDK's ``ResourceNotFoundError`` into the port's ``KeyError(key)``, so no
+    ``Storage`` consumer has to import azure to recognize a missing object."""
+    from azure.core.exceptions import ResourceNotFoundError
+
+    try:
+        yield
+    except ResourceNotFoundError as exc:
+        raise KeyError(key) from exc
+
+
+def _minio_endpoint_url() -> str:
+    """Build an http(s) MinIO URL from MINIO_ENDPOINT (host:port) + MINIO_SECURE, mirroring 0.11."""
+    endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        return endpoint
+    scheme = "https" if os.getenv("MINIO_SECURE", "false").lower() == "true" else "http"
+    return f"{scheme}://{endpoint}"
+
+
+def build_storage_from_env():
+    """The ONE place a recordings ``Storage`` backend is chosen — ``STORAGE_BACKEND`` selects it.
+
+    That is the SAME var stamped into each recording's ``storage_backend`` JSONB field (``jsonb.py``),
+    deliberately: the label an operator reads to find a tape and the dispatch that decided where the
+    bytes went cannot drift apart while they are one value.
+
+    Unset means ``minio``, with the endpoint/bucket/credential fallback chains 0.11 shipped — so an
+    operator rolling back to the previous image with unchanged env keeps a working deployment. A
+    configured-but-unsatisfiable backend raises HERE, at boot, naming the missing key; the
+    alternative is a service that starts clean and then 500s the first chunk upload of every meeting.
+    """
+    backend = (os.getenv("STORAGE_BACKEND") or "minio").strip().lower()
+    if backend == "azure":
+        conn = (os.getenv("AZURE_STORAGE_CONNECTION_STRING") or "").strip()
+        if not conn:
+            raise RuntimeError(
+                "STORAGE_BACKEND=azure requires AZURE_STORAGE_CONNECTION_STRING (unset or empty)"
+            )
+        return AzureBlobStorage(
+            container=os.getenv("AZURE_STORAGE_CONTAINER") or "vexa",
+            connection_string=conn,
+        )
+    if backend != "minio":
+        raise RuntimeError(f"unknown STORAGE_BACKEND {backend!r} — expected 'minio' or 'azure'")
+    return S3Storage(
+        bucket=os.getenv("MINIO_BUCKET", os.getenv("RECORDING_BUCKET", "vexa")),
+        endpoint_url=os.getenv("S3_ENDPOINT") or _minio_endpoint_url(),
+        access_key=os.getenv("S3_ACCESS_KEY") or os.getenv("MINIO_ACCESS_KEY"),
+        secret_key=os.getenv("S3_SECRET_KEY") or os.getenv("MINIO_SECRET_KEY"),
+    )
 
 
 class SqlAlchemyRecordingRepo:
@@ -250,7 +426,7 @@ class SqlAlchemyRecordingRepo:
 
 
 def build_production_router(*, database_url: Optional[str] = None):
-    """Construct the recordings router with real MinIO/S3 + SQLAlchemy adapters from env."""
+    """Construct the recordings router with the env-selected storage + SQLAlchemy adapters."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from ..db import build_engine
@@ -261,10 +437,4 @@ def build_production_router(*, database_url: Optional[str] = None):
     )
     engine = build_engine(database_url)  # #635: env-steered pool
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    storage = S3Storage(
-        bucket=os.getenv("RECORDING_BUCKET", "recordings"),
-        endpoint_url=os.getenv("S3_ENDPOINT"),
-        access_key=os.getenv("S3_ACCESS_KEY"),
-        secret_key=os.getenv("S3_SECRET_KEY"),
-    )
-    return build_router(SqlAlchemyRecordingRepo(session_factory), storage)
+    return build_router(SqlAlchemyRecordingRepo(session_factory), build_storage_from_env())
