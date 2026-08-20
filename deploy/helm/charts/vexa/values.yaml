@@ -205,6 +205,13 @@ meetingApi:
   botS3AccessKey: ""
   botS3SecretKey: ""
   minioSecure: "false"
+  # Where recordings are written. "minio" (default) uses the in-cluster store this chart deploys;
+  # "azure" writes to an Azure Blob container instead — set azureStorageConnectionString with it (the
+  # meeting-api refuses to boot on azure without one) and you can then run with minio.enabled=false.
+  # The container must already exist; the adapter never creates it.
+  storageBackend: "minio"
+  azureStorageConnectionString: ""
+  azureStorageContainer: "vexa"
   logLevel: "info"
   resources:
     requests: { cpu: 200m, memory: 512Mi }

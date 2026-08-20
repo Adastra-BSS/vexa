@@ -126,6 +126,15 @@ spec:
             {{- end }}
             - name: MINIO_SECURE
               value: {{ .Values.meetingApi.minioSecure | default "false" | quote }}
+            # Which object store recordings land in — OUTSIDE the minio.enabled gate (like
+            # MINIO_SECURE above), because `azure` is exactly the case where no in-cluster minio is
+            # deployed. The same var is stamped into each recording's storage_backend JSONB field.
+            - name: STORAGE_BACKEND
+              value: {{ .Values.meetingApi.storageBackend | default "minio" | quote }}
+            - name: AZURE_STORAGE_CONNECTION_STRING
+              value: {{ .Values.meetingApi.azureStorageConnectionString | default "" | quote }}
+            - name: AZURE_STORAGE_CONTAINER
+              value: {{ .Values.meetingApi.azureStorageContainer | default "vexa" | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.meetingApi.logLevel | default "info" | quote }}
             # Authenticated-bot mode (deployment-scoped) — docs: /authenticated-bots.

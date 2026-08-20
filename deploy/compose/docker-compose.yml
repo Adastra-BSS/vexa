@@ -349,6 +349,12 @@ services:
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-vexa-secret-key}
       - MINIO_BUCKET=${MINIO_BUCKET:-vexa}
       - MINIO_SECURE=${MINIO_SECURE:-false}
+      # Which object store recordings land in. `minio` (default) is the stock compose deployment;
+      # `azure` writes to an Azure Blob container instead and needs the connection string below. The
+      # same var is stamped into each recording's storage_backend JSONB field.
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-minio}
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING:-}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-vexa}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)"]

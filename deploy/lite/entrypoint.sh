@@ -71,6 +71,12 @@ export MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"
 export MINIO_BUCKET="${MINIO_BUCKET:-vexa}"
 export MINIO_SECURE="${MINIO_SECURE:-false}"
 
+# Recordings storage backend: `minio` (default) or `azure` (Azure Blob; needs the connection
+# string). Also stamped into each recording's storage_backend JSONB field.
+export STORAGE_BACKEND="${STORAGE_BACKEND:-minio}"
+export AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING:-}"
+export AZURE_STORAGE_CONTAINER="${AZURE_STORAGE_CONTAINER:-vexa}"
+
 # Gateway edge guard (fastapi-guard): ON by default with generous limits (owner ruling).
 # Opt out with -e GUARD_ENABLED=false on the container. Other GUARD_* tuning keys
 # (GUARD_RATE_LIMIT_RPM, GUARD_TRUSTED_PROXIES, …) flow through container env untouched.
