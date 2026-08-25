@@ -71,9 +71,25 @@ from .service import DuplicateMeeting, request_bot
 # — spawn, browser boot and the join flow all happen inside the lead. Two minutes early plus the
 # 15-minute lobby budget (``bot_spawn.service.lobby_budget_ms``) is the pair that makes "the bot is
 # already there" true for a host who joins late.
-DEFAULT_LEAD_S = 120         # AUTO_JOIN_LEAD_S — join this many seconds BEFORE scheduled_at
+DEFAULT_LEAD_S = 120         # AUTO_JOIN_LEAD_S — SPAWN this many seconds BEFORE scheduled_at
 DEFAULT_GRACE_S = 600        # AUTO_JOIN_GRACE_S — never join more than this AFTER scheduled_at
 DEFAULT_RETRY_BACKOFF_S = 300  # AUTO_JOIN_RETRY_BACKOFF_S — error-stamped rows wait this long
+# AUTO_JOIN_LOBBY_LEAD_S — the bot CLICKS JOIN this many seconds before scheduled_at. The gap
+# between the spawn lead above and this lobby lead is the join-hold window (jana #40): the pod's
+# cold start (node scale-up + image pull) happens inside it, invisible to the meeting, and the
+# lobby only ever sees the bot for roughly this long before start.
+DEFAULT_LOBBY_LEAD_S = 60
+
+
+def join_not_before(data: dict, *, lobby_lead_s: float) -> Optional[str]:
+    """The ISO instant the bot may start its join flow: ``scheduled_at - lobby_lead_s``.
+
+    None when the row carries no parseable ``scheduled_at`` (manual sends) — the bot then joins
+    immediately, exactly as before the hold existed."""
+    at = _parse_iso(data.get("scheduled_at")) if isinstance(data, dict) else None
+    if at is None:
+        return None
+    return (at - timedelta(seconds=lobby_lead_s)).isoformat()
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
@@ -207,6 +223,7 @@ async def auto_join_tick(
     lead_s: float = DEFAULT_LEAD_S,
     grace_s: float = DEFAULT_GRACE_S,
     retry_backoff_s: float = DEFAULT_RETRY_BACKOFF_S,
+    lobby_lead_s: float = DEFAULT_LOBBY_LEAD_S,
     token_secret: Optional[str] = None,
     redis_url: Optional[str] = None,
     allow_uncapped: bool = False,
@@ -341,6 +358,7 @@ async def auto_join_tick(
                 webhook_events=ctx.get("webhook_events"),
                 token_secret=token_secret,
                 redis_url=redis_url,
+                join_not_before=join_not_before(data, lobby_lead_s=lobby_lead_s),
             )
         except DuplicateMeeting:
             # a manual "Send bot now" (or a racing sweep) already claimed it — success, not an error

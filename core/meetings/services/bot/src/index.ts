@@ -30,6 +30,7 @@ import { createHttpLifecycleSink } from './adapters/lifecycle-http.js';
 import { createRedisTranscriptSink, redisClientFrom } from './adapters/transcript-redis.js';
 import { createRedisActsSource, redisActsClientFrom } from './adapters/acts-redis.js';
 import { createBrowserJoinDriver } from './join-driver.js';
+import { JOIN_NOT_BEFORE_ENV } from './join-hold.js';
 import { createBotPipeline, createLivePipeline, createTranscribe, serr, type BotPipeline } from './pipeline.js';
 import { createBotRecordingSink } from './recording.js';
 import { createCaptureSignalRecorder, startBotLogSidecar, wrapTranscribeWithTap, wrapTranscriptWithSnapshot, type CaptureSignalRecorder } from './telemetry.js';
@@ -225,7 +226,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 
   try {
     session = await launchBrowser(inv);                                   // L4 (O6/VM)
-    join = createBrowserJoinDriver(session.page, inv);
+    // VEXA_JOIN_NOT_BEFORE rides the workload spec env (NOT invocation.v1 — the contract is
+    // sealed); when set, the driver holds the join flow until it so a spawned-early bot enters
+    // the lobby just before the scheduled start (jana #40).
+    join = createBrowserJoinDriver(session.page, inv, {
+      joinNotBefore: process.env[JOIN_NOT_BEFORE_ENV],
+    });
     botPipeline = createBotPipeline(inv, transcript, {
       // When recording, tee every STT round-trip to <session>.stt.jsonl (the capture/STT/assembly bisect).
       transcribe: signalRecorder ? wrapTranscribeWithTap(createTranscribe(inv), signalRecorder.path) : undefined,

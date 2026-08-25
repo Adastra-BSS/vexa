@@ -232,6 +232,10 @@ def test_internal_bot_context(client):
     assert ctx["max_concurrent"] == 4
     assert ctx["webhook_url"] == "https://example.com/hook"
     assert ctx["webhook_secret"] == "shh"
+    # No calendar bot name was ever set → the key is ABSENT, so the spawn flow falls through to
+    # its own DEFAULT_BOT_NAME. The old `or "Vexa"` fallback here overrode that default on every
+    # auto-join while manual sends used it — the same deployment answered with two names.
+    assert "bot_name" not in ctx
 
     # unknown user → 404
     r = client.get("/internal/users/999999/bot-context",

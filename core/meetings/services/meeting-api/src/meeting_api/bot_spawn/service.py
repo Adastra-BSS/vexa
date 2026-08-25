@@ -281,6 +281,11 @@ async def request_bot(
     webhook_url: Optional[str] = None,
     webhook_secret: Optional[str] = None,
     webhook_events: Optional[dict] = None,
+    # Spawn-early-join-late (jana #40): when set (ISO 8601), the bot boots immediately but holds
+    # the join flow until this instant, so a generous spawn lead absorbs the pod cold start without
+    # the bot loitering in the lobby. Rides the workload spec env (VEXA_JOIN_NOT_BEFORE), never the
+    # sealed invocation.v1.
+    join_not_before: Optional[str] = None,
 ) -> dict:
     """Run the spawn flow and return a MeetingResponse-shaped dict.
 
@@ -652,6 +657,7 @@ async def request_bot(
         workload_id=f"mtg-{meeting_id}-{connection_id[:8]}",
         invocation=invocation,
         callback_url=f"{meeting_api_url}/runtime/callback",
+        extra_env={"VEXA_JOIN_NOT_BEFORE": join_not_before} if join_not_before else None,
     )
     try:
         result = await runtime.create_workload(spec)

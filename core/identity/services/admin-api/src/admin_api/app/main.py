@@ -930,8 +930,14 @@ def create_app() -> FastAPI:
         data = user.data if isinstance(user.data, dict) else {}
         resp: dict = {
             "max_concurrent": user.max_concurrent_bots,
-            "bot_name": data.get("calendar_bot_name") or "Vexa",
         }
+        # Only a name the user EXPLICITLY chose crosses this edge. The old `or "Vexa"` fallback
+        # made an unset preference indistinguishable from a deliberate choice, so it silently
+        # overrode the spawner's DEFAULT_BOT_NAME on every auto-join (a manual send said the
+        # deployment's name, a calendar join said "Vexa"). Absent here → the spawn flow's own
+        # default applies, which is the single place a deployment names its bot.
+        if data.get("calendar_bot_name"):
+            resp["bot_name"] = data["calendar_bot_name"]
         # Fixture collection (O-TEL-1): whether this spawn tapes its raw captured-signal stream.
         # ALWAYS present in the response — a missing key downstream is indistinguishable from an
         # unreachable identity, and bot_spawn must default ON in BOTH cases, so it is stated here

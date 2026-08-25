@@ -15,6 +15,7 @@ import {
 } from '@vexa/join';
 import type { BotStatus } from './contracts.js';
 import type { Invocation } from './config.js';
+import { holdUntilJoinTime } from './join-hold.js';
 import type { JoinDriver, JoinOutcome, JoinResult } from './ports.js';
 
 /**
@@ -56,10 +57,18 @@ function joinPlatform(p: string): JoinPlatform {
   return (p === 'teams' || p === 'zoom' || p === 'jitsi') ? p : 'google_meet';
 }
 
-export function createBrowserJoinDriver(page: Page, inv: Invocation): JoinDriver {
+export function createBrowserJoinDriver(
+  page: Page,
+  inv: Invocation,
+  opts?: { joinNotBefore?: string },
+): JoinDriver {
   const platform = joinPlatform(inv.platform);
   return {
     async join(report): Promise<JoinResult> {
+      // Spawn-early-join-late (jana #40): the hold lives INSIDE join() so the orchestrator's
+      // pre-active abort race covers it — a user Stop during the hold withdraws cleanly. Until it
+      // elapses the browser sits on about:blank; the meeting page never sees a loitering bot.
+      await holdUntilJoinTime(opts?.joinNotBefore);
       let r;
       try {
         r = await joinMeeting(page, {
