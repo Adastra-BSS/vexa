@@ -36,6 +36,12 @@
       "license": "AGPL-3.0-or-later",
       "disposition": "sidecar",
       "reason": "MinIO client, used only by the compose/helm bucket-init Job. Same disposition as minio/minio: operator-pulled, never redistributed inside a vexaai/* artifact (ADR-0004)."
+    },
+    {
+      "name": "mcr.microsoft.com/azure-storage/azurite",
+      "license": "MIT",
+      "disposition": "sidecar",
+      "note": "compose + lite Azure Blob emulator, the local stand-in for the Azure recordings adapter. Azurite is MIT (github.com/Azure/Azurite); the Node/Debian packages its image installs are separately inventoried in the SPDX with unresolved fields stated as NOASSERTION."
     }
   ],
   "bundled": [
