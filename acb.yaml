@@ -1,0 +1,89 @@
+# Multi-step ACR task definition: the registry that watches this repo builds these five
+# images (plus the join-env base) and the Helm chart from every push to jana-pilot.
+# The task itself is created by jana-aickova's scripts/setup_vexa_acr_task.sh; this file
+# owns WHAT gets built, that script owns WHICH registry watches the repo.
+#
+# {{.Run.Registry}} is the registry running the task, {{.Run.Commit}} the pushed sha.
+# Build contexts mirror deploy/compose/docker-compose.yml: meeting-api and the bot need
+# the repo root (workspace installs), the rest build from their own directory.
+version: v1.1.0
+steps:
+  # The ACR builder has no BuildKit, so RUN --mount=type=cache lines fail outright.
+  # Strip the flag (losing only build-time caching) and fail loudly if any survive.
+  - id: strip-cache-mounts
+    entryPoint: sh
+    cmd: >-
+      bash:5 -c "set -e;
+      grep -rl -- '--mount=type=cache' core --include='Dockerfile*' | xargs -r sed -i 's/RUN --mount=type=cache[^ ]* /RUN /';
+      ! grep -rq -- '--mount=type=cache' core --include='Dockerfile*'"
+
+  # The bot's Dockerfile says FROM vexa/meet-join-env:dev; building the base first on the
+  # same docker state makes that resolve locally, exactly like deploy/compose/Makefile.
+  - id: join-env
+    build: -f core/meetings/modules/join/Dockerfile.env -t vexa/meet-join-env:dev core/meetings/modules/join
+    when: ["strip-cache-mounts"]
+
+  - id: gateway
+    build: >-
+      -f core/gateway/services/gateway/Dockerfile
+      -t {{.Run.Registry}}/vexa-gateway:jana-pilot
+      -t {{.Run.Registry}}/vexa-gateway:jana-pilot-{{.Run.Commit}}
+      core/gateway/services/gateway
+    when: ["strip-cache-mounts"]
+  - id: admin-api
+    build: >-
+      -f core/identity/services/admin-api/Dockerfile
+      -t {{.Run.Registry}}/vexa-admin-api:jana-pilot
+      -t {{.Run.Registry}}/vexa-admin-api:jana-pilot-{{.Run.Commit}}
+      core/identity/services/admin-api
+    when: ["strip-cache-mounts"]
+  - id: meeting-api
+    build: >-
+      -f core/meetings/services/meeting-api/Dockerfile
+      -t {{.Run.Registry}}/vexa-meeting-api:jana-pilot
+      -t {{.Run.Registry}}/vexa-meeting-api:jana-pilot-{{.Run.Commit}}
+      .
+    when: ["strip-cache-mounts"]
+  - id: runtime
+    build: >-
+      -f core/runtime/Dockerfile
+      -t {{.Run.Registry}}/vexa-runtime:jana-pilot
+      -t {{.Run.Registry}}/vexa-runtime:jana-pilot-{{.Run.Commit}}
+      core/runtime
+    when: ["strip-cache-mounts"]
+  - id: bot
+    build: >-
+      -f core/meetings/services/bot/Dockerfile
+      --build-arg VEXA_IMAGE_VERSION={{.Run.Commit}}
+      -t {{.Run.Registry}}/vexa-bot:jana-pilot
+      -t {{.Run.Registry}}/vexa-bot:jana-pilot-{{.Run.Commit}}
+      .
+    when: ["join-env"]
+
+  - id: push-images
+    push:
+      - "{{.Run.Registry}}/vexa-gateway:jana-pilot"
+      - "{{.Run.Registry}}/vexa-gateway:jana-pilot-{{.Run.Commit}}"
+      - "{{.Run.Registry}}/vexa-admin-api:jana-pilot"
+      - "{{.Run.Registry}}/vexa-admin-api:jana-pilot-{{.Run.Commit}}"
+      - "{{.Run.Registry}}/vexa-meeting-api:jana-pilot"
+      - "{{.Run.Registry}}/vexa-meeting-api:jana-pilot-{{.Run.Commit}}"
+      - "{{.Run.Registry}}/vexa-runtime:jana-pilot"
+      - "{{.Run.Registry}}/vexa-runtime:jana-pilot-{{.Run.Commit}}"
+      - "{{.Run.Registry}}/vexa-bot:jana-pilot"
+      - "{{.Run.Registry}}/vexa-bot:jana-pilot-{{.Run.Commit}}"
+    when: ["gateway", "admin-api", "meeting-api", "runtime", "bot"]
+
+  # The chart goes LAST on purpose: consumers anchor on the newest chart tag, so a chart
+  # tag existing means every image of that commit is already pushed. The version prefix
+  # is read from Chart.yaml so a chart version bump needs no edit here.
+  # Auth: the task's registry credentials land in the shared docker config; helm reads
+  # the same file via HELM_REGISTRY_CONFIG.
+  - id: chart
+    entryPoint: sh
+    cmd: >-
+      alpine/helm:3.16.2 -c "set -e;
+      VER=$(sed -n 's/^version: *//p' deploy/helm/charts/vexa/Chart.yaml);
+      helm package deploy/helm/charts/vexa --version \"$VER-jana-pilot-{{.Run.Commit}}\" -d /tmp/chart;
+      HELM_REGISTRY_CONFIG=/root/.docker/config.json helm push /tmp/chart/vexa-*.tgz oci://{{.Run.Registry}}/helm"
+    when: ["push-images"]
