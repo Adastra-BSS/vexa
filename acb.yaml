@@ -75,15 +75,10 @@ steps:
     when: ["gateway", "admin-api", "meeting-api", "runtime", "bot"]
 
   # The chart goes LAST on purpose: consumers anchor on the newest chart tag, so a chart
-  # tag existing means every image of that commit is already pushed. The version prefix
-  # is read from Chart.yaml so a chart version bump needs no edit here.
-  # Auth: the task's registry credentials land in the shared docker config; helm reads
-  # the same file via HELM_REGISTRY_CONFIG.
+  # tag existing means every image of that commit is already pushed. The logic lives in
+  # deploy/acr/push-chart.sh because ACB substitutes $-aliases in this file, which mangles
+  # inline shell variables.
   - id: chart
     entryPoint: sh
-    cmd: >-
-      alpine/helm:3.16.2 -c "set -e;
-      VER=$(sed -n 's/^version: *//p' deploy/helm/charts/vexa/Chart.yaml);
-      helm package deploy/helm/charts/vexa --version \"$VER-jana-pilot-{{.Run.Commit}}\" -d /tmp/chart;
-      HELM_REGISTRY_CONFIG=/root/.docker/config.json helm push /tmp/chart/vexa-*.tgz oci://{{.Run.Registry}}/helm"
+    cmd: alpine/helm:3.16.2 deploy/acr/push-chart.sh {{.Run.Registry}} {{.Run.Commit}}
     when: ["push-images"]
