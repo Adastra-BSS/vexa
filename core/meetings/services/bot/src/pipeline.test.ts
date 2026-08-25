@@ -298,8 +298,12 @@ async function main(): Promise<void> {
     const named = sink.published.find((segment) => segment.text === 'confirmed words');
     check('Teams publishes the earned human name and a stable CSRC speaker key',
       named?.speaker === 'Alice' && named.speaker_key === 'csrc:201', JSON.stringify(named));
-    check('Teams provisional Speaker A/B labels stay internal',
-      sink.published.find((segment) => segment.text === 'forming')?.speaker === '', JSON.stringify(sink.published));
+    // A lettered CSRC label is a refusal to NAME, never a refusal to SEPARATE: the letter is stable
+    // per transport track for the whole meeting, so it crosses the boundary intact and a late real
+    // name repaints it by segment_id (the 'confirmed words' row above is that repaint). Blanking it
+    // would merge every un-named Teams voice into one anonymous run.
+    check('Teams lettered CSRC labels cross the boundary intact (one stable track)',
+      sink.published.find((segment) => segment.text === 'forming')?.speaker === 'Speaker A', JSON.stringify(sink.published));
     check('Teams segment is transcript.v1-valid and producer-stamped for live rendering',
       !!named && !!validateSeg(named) && named.absolute_start_time === new Date(1_000).toISOString(),
       `${JSON.stringify(named)} ${ajv.errorsText(validateSeg.errors)}`);
