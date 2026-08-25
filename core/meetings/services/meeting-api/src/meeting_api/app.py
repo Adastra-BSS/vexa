@@ -369,6 +369,7 @@ def _mount_lifecycle(
     """
     import jsonschema
 
+    from .lifecycle import lead
     from .lifecycle.machine import IllegalTransition, TransitionSource
     from .lifecycle.provenance import build_service_provenance
     from .lifecycle.receiver import conforms
@@ -534,18 +535,47 @@ def _mount_lifecycle(
         # re-persist + re-deliver so a redelivered terminal does not fire a duplicate webhook /
         # publish. We still return 200 (handled below) — the redelivery is acknowledged as a no-op.
         meeting_row = None
+        lobby_advanced = (
+            not change.no_op
+            and rec.status is not None
+            and rec.status.value == lead.LOBBY_STATUS
+        )
         if rec.status is not None and not change.no_op:
+            persist_data = rec.data if isinstance(rec.data, dict) else None
+            if lobby_advanced and persist_data is not None:
+                # Stamp the lobby arrival as a top-level key so the join lead is queryable with
+                # `data->>'lobby_at'` against `data->>'scheduled_at'`, not by digging through the
+                # status_transition[] array (jana #40: the lead was unmeasured).
+                lobby_at = lead.lobby_timestamp(persist_data.get("status_transition"))
+                if lobby_at is not None:
+                    persist_data = {**persist_data, "lobby_at": lobby_at}
             try:
                 meeting_row = await meeting_repo.update_meeting_status(
                     session_uid=rec.connection_id,
                     status=rec.status.value,
                     completion_reason=rec.completion_reason.value if rec.completion_reason else None,
                     failure_stage=rec.failure_stage.value if rec.failure_stage else None,
-                    data=rec.data if isinstance(rec.data, dict) else None,
+                    data=persist_data,
                 )
             except Exception as e:  # noqa: BLE001 — persistence is best-effort
                 log_event("lifecycle_persist_failed", audience="system", level="warning",
                           span="lifecycle.callback", fields={"error": str(e)})
+        if lobby_advanced and isinstance(meeting_row, dict):
+            # The join-lead number (jana #40): scheduled_at from the persisted row (the planned-row
+            # claim carried it there), lobby_at from the trail persisted just above. A negative
+            # lead_s means the bot reached the lobby AFTER the scheduled start — the alertable
+            # condition that previously surfaced only as a customer report. Manual sends have no
+            # scheduled_at: lead_s is null but lobby_at still lands, so their cold-start cost stays
+            # visible.
+            fields = lead.lead_fields(meeting_row.get("data"))
+            if fields is not None:
+                log_event(
+                    "lobby_lead", audience="operator",
+                    level="warning" if fields["late"] else "info",
+                    span="lifecycle.callback",
+                    meeting_id=str(meeting_row.get("id")),
+                    fields=fields,
+                )
         # COMPLETION FINALIZATION — the moment the FSM lands on a terminal status, flush the
         # meeting's remaining live redis segments to the durable store (threshold 0: the mutable
         # tail included, no more updates are coming) and persist the processed doc into
