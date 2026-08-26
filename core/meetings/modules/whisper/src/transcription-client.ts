@@ -133,16 +133,23 @@ export class TranscriptionClient {
   private minSilenceDurationMs: number | undefined;
   private model: string;
   private allowedLanguages: string[] | undefined;
-  /** Azure OpenAI speaks the same audio API behind a different envelope: the deployment and the
-   *  api-version are baked into the URL, the key rides an `api-key` header rather than a bearer
-   *  token, and the faster-whisper-only knobs (verbose_json, word timestamps, VAD tuning) are not
-   *  served. One flag, read off the URL's deployment path, switches all of it. */
-  private azureMode: boolean;
+  /** The URL's shape picks the envelope, the auth header and the response parser in one move —
+   *  the same predicates the boot probe applies (config.v1 preflight):
+   *  `/openai/deployments/` — Azure OpenAI: deployment + api-version baked into the URL, key on
+   *  `api-key`, no faster-whisper-only knobs (verbose_json, word timestamps, VAD tuning);
+   *  `/speechtotext/` — Azure AI Speech fast transcription: operation + api-version baked into
+   *  the URL, key on `Ocp-Apim-Subscription-Key`, ONE `audio` file part plus a `definition` JSON
+   *  field, millisecond phrases in the response;
+   *  anything else — an OpenAI-compatible whisper backend behind `/v1/audio/transcriptions`. */
+  private mode: 'whisper' | 'azure-openai' | 'azure-speech';
   constructor(config: TranscriptionClientConfig) {
-    // Ensure serviceUrl ends with the transcriptions endpoint
+    // Ensure serviceUrl ends with the transcriptions endpoint (whisper mode only — the Azure
+    // shapes carry their own operation path plus query string verbatim)
     this.serviceUrl = config.serviceUrl.replace(/\/+$/, '');
-    this.azureMode = this.serviceUrl.includes('/openai/deployments/');
-    if (!this.azureMode && !this.serviceUrl.endsWith('/v1/audio/transcriptions')) {
+    this.mode = this.serviceUrl.includes('/speechtotext/') ? 'azure-speech'
+      : this.serviceUrl.includes('/openai/deployments/') ? 'azure-openai'
+      : 'whisper';
+    if (this.mode === 'whisper' && !this.serviceUrl.endsWith('/v1/audio/transcriptions')) {
       this.serviceUrl += '/v1/audio/transcriptions';
     }
     this.apiToken = config.apiToken;
@@ -205,85 +212,101 @@ export class TranscriptionClient {
     const boundary = `----FormBoundary${Date.now().toString(36)}`;
 
     const parts: Buffer[] = [];
+    const speech = this.mode === 'azure-speech';
+    const azureOpenAI = this.mode === 'azure-openai';
 
-    // File part
+    // File part. Fast transcription names it `audio`; the OpenAI-compatible envelopes `file`.
     parts.push(Buffer.from(
       `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n` +
+      `Content-Disposition: form-data; name="${speech ? 'audio' : 'file'}"; filename="audio.wav"\r\n` +
       `Content-Type: audio/wav\r\n\r\n`
     ));
     parts.push(wavBuffer);
     parts.push(Buffer.from('\r\n'));
 
-    // Model part (required by OpenAI-compatible API; validating backends reject unknown ids)
-    parts.push(Buffer.from(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="model"\r\n\r\n` +
-      `${this.model}\r\n`
-    ));
-
-    // Response format part. Azure's gpt-transcribe serves `json` only — asking it for
-    // verbose_json is a 400, so the segment-shaped response is rebuilt below instead.
-    parts.push(Buffer.from(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="response_format"\r\n\r\n` +
-      `${this.azureMode ? 'json' : 'verbose_json'}\r\n`
-    ));
-
-    // Language part (if specified)
-    if (language) {
+    if (speech) {
+      // The fast-transcription envelope takes exactly one more field: the `definition` JSON.
+      // Locales stay BCP-47 verbatim; with no hint the service runs language identification.
+      const definition = this.allowedLanguages
+        ? { locales: this.allowedLanguages }
+        : {};
       parts.push(Buffer.from(
         `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="language"\r\n\r\n` +
-        `${language}\r\n`
+        `Content-Disposition: form-data; name="definition"\r\n\r\n` +
+        `${JSON.stringify(definition)}\r\n`
       ));
-    }
+    } else {
+      // Model part (required by OpenAI-compatible API; validating backends reject unknown ids)
+      parts.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="model"\r\n\r\n` +
+        `${this.model}\r\n`
+      ));
 
-    // Multi-language hint: the set the model may switch between, one part per language.
-    if (this.azureMode && this.allowedLanguages) {
-      for (const lang of this.allowedLanguages) {
+      // Response format part. Azure's gpt-transcribe serves `json` only — asking it for
+      // verbose_json is a 400, so the segment-shaped response is rebuilt below instead.
+      parts.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="response_format"\r\n\r\n` +
+        `${azureOpenAI ? 'json' : 'verbose_json'}\r\n`
+      ));
+
+      // Language part (if specified)
+      if (language) {
         parts.push(Buffer.from(
           `--${boundary}\r\n` +
-          `Content-Disposition: form-data; name="languages[]"\r\n\r\n` +
-          `${lang}\r\n`
+          `Content-Disposition: form-data; name="language"\r\n\r\n` +
+          `${language}\r\n`
         ));
       }
-    }
 
-    // Request word-level timestamps (faster-whisper's granularity knob; not served by Azure)
-    if (!this.azureMode) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="timestamp_granularities"\r\n\r\n` +
-        `word\r\n`
-      ));
-    }
+      // Multi-language hint: the set the model may switch between, one part per language.
+      // This envelope takes bare ISO codes, so BCP-47 locales truncate (cs-CZ -> cs).
+      if (azureOpenAI && this.allowedLanguages) {
+        for (const lang of this.allowedLanguages) {
+          parts.push(Buffer.from(
+            `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="languages[]"\r\n\r\n` +
+            `${lang.split('-')[0]}\r\n`
+          ));
+        }
+      }
 
-    // Max speech segment duration (controls how often Whisper splits segments)
-    if (!this.azureMode && this.maxSpeechDurationSec !== undefined) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="max_speech_duration_s"\r\n\r\n` +
-        `${this.maxSpeechDurationSec}\r\n`
-      ));
-    }
+      // Request word-level timestamps (faster-whisper's granularity knob; not served by Azure)
+      if (!azureOpenAI) {
+        parts.push(Buffer.from(
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="timestamp_granularities"\r\n\r\n` +
+          `word\r\n`
+        ));
+      }
 
-    // Min silence duration for VAD segment splitting (lower = more splits at natural pauses)
-    if (!this.azureMode && this.minSilenceDurationMs !== undefined) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="min_silence_duration_ms"\r\n\r\n` +
-        `${this.minSilenceDurationMs}\r\n`
-      ));
-    }
+      // Max speech segment duration (controls how often Whisper splits segments)
+      if (!azureOpenAI && this.maxSpeechDurationSec !== undefined) {
+        parts.push(Buffer.from(
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="max_speech_duration_s"\r\n\r\n` +
+          `${this.maxSpeechDurationSec}\r\n`
+        ));
+      }
 
-    // Prompt: previous confirmed text as context for streaming continuity
-    if (prompt) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="prompt"\r\n\r\n` +
-        `${prompt}\r\n`
-      ));
+      // Min silence duration for VAD segment splitting (lower = more splits at natural pauses)
+      if (!azureOpenAI && this.minSilenceDurationMs !== undefined) {
+        parts.push(Buffer.from(
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="min_silence_duration_ms"\r\n\r\n` +
+          `${this.minSilenceDurationMs}\r\n`
+        ));
+      }
+
+      // Prompt: previous confirmed text as context for streaming continuity
+      if (prompt) {
+        parts.push(Buffer.from(
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="prompt"\r\n\r\n` +
+          `${prompt}\r\n`
+        ));
+      }
     }
 
     // End boundary
@@ -295,7 +318,8 @@ export class TranscriptionClient {
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
     };
     if (this.apiToken) {
-      if (this.azureMode) headers['api-key'] = this.apiToken;
+      if (speech) headers['Ocp-Apim-Subscription-Key'] = this.apiToken;
+      else if (azureOpenAI) headers['api-key'] = this.apiToken;
       else headers['Authorization'] = `Bearer ${this.apiToken}`;
     }
 
@@ -323,9 +347,35 @@ export class TranscriptionClient {
       // segment's span to place a turn, and a zero-length span collapses the whole window onto
       // its first instant. The window IS the span we know, so state it.
       const windowSec = Math.max(0, (wavBuffer.length - 44) / 2) / this.sampleRate;
-      const rawSegments = (data.segments && data.segments.length) || !this.azureMode
-        ? (data.segments || [])
-        : (String(data.text ?? '').trim() ? [{ start: 0, end: windowSec, text: data.text }] : []);
+      let rawSegments: any[];
+      let responseText: string;
+      let responseLanguage: string | undefined;
+      let responseDuration: number;
+      if (speech) {
+        // Fast transcription answers millisecond phrases; the lanes consume seconds. A response
+        // with no phrases still carries combinedPhrases — synthesize one window-spanning segment
+        // from that text so downstream timing never collapses to a zero-length span.
+        const phrases: any[] = data.phrases || [];
+        const combined = (data.combinedPhrases || [])
+          .map((c: any) => String(c.text ?? '').trim()).filter(Boolean).join(' ');
+        rawSegments = phrases.length
+          ? phrases.map((p: any) => ({
+              start: (p.offsetMilliseconds || 0) / 1000,
+              end: ((p.offsetMilliseconds || 0) + (p.durationMilliseconds || 0)) / 1000,
+              text: p.text || '',
+            }))
+          : (combined ? [{ start: 0, end: windowSec, text: combined }] : []);
+        responseText = combined;
+        responseLanguage = phrases[0]?.locale;
+        responseDuration = (data.durationMilliseconds || 0) / 1000 || windowSec;
+      } else {
+        rawSegments = (data.segments && data.segments.length) || !azureOpenAI
+          ? (data.segments || [])
+          : (String(data.text ?? '').trim() ? [{ start: 0, end: windowSec, text: data.text }] : []);
+        responseText = data.text || '';
+        responseLanguage = data.language;
+        responseDuration = data.duration || (azureOpenAI ? windowSec : 0);
+      }
 
       const allSegments = rawSegments.map((s: any) => ({
         start: s.start || 0,
@@ -342,15 +392,15 @@ export class TranscriptionClient {
       const segments = allSegments.filter((s: any) => !isLowConfidenceSegment(s));
       const text = allSegments.length
         ? segments.map((s: any) => (s.text || '').trim()).filter(Boolean).join(' ')
-        : (data.text || '');
+        : responseText;
       if (allSegments.length && segments.length < allSegments.length) {
         log(`[STT] dropped ${allSegments.length - segments.length}/${allSegments.length} low-confidence segment(s)`);
       }
       return {
         text,
-        language: data.language || language || 'unknown',
+        language: responseLanguage || language || 'unknown',
         language_probability: data.language_probability ?? 0,
-        duration: data.duration || (this.azureMode ? windowSec : 0),
+        duration: responseDuration,
         segments,
       };
     } finally {

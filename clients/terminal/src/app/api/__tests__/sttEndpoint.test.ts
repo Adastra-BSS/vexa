@@ -29,4 +29,16 @@ describe("sttEndpoint — the shared TRANSCRIPTION_SERVICE_URL rule", () => {
     // a reverse-proxied deployment (…/stt) is a base like any other — append, do not rewrite
     expect(sttEndpoint("https://internal.example/stt")).toBe(`https://internal.example/stt${STT_PATH}`);
   });
+
+  it("passes an Azure OpenAI deployment URL through verbatim", () => {
+    const azure =
+      "https://acct.openai.azure.com/openai/deployments/gpt-transcribe/audio/transcriptions?api-version=2025-04-01-preview";
+    expect(sttEndpoint(azure)).toBe(azure);
+  });
+
+  it("passes an Azure Speech fast-transcription URL through verbatim", () => {
+    const speech =
+      "https://northeurope.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=2024-11-15";
+    expect(sttEndpoint(speech)).toBe(speech);
+  });
 });

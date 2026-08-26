@@ -249,6 +249,7 @@ class _ProbeServer:
         self.default_status = default_status
         self.paths: list = []
         self.headers_seen: list = []
+        self.bodies_seen: list = []
         self._server = None
         self._thread = None
 
@@ -262,6 +263,7 @@ class _ProbeServer:
             def do_POST(self):  # noqa: N802 — BaseHTTPRequestHandler's interface
                 outer.paths.append(self.path)
                 outer.headers_seen.append({k.lower(): v for k, v in self.headers.items()})
+                outer.bodies_seen.append(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 self.send_response(outer.routes.get(self.path, outer.default_status))
                 self.end_headers()
 
@@ -373,6 +375,55 @@ def test_probe_requests_an_azure_deployment_url_verbatim_with_api_key_auth():
     assert requested == [_AZURE_STT_PATH], f"expected the verbatim azure path once, got {requested}"
     assert headers[0].get("api-key") == "tok"
     assert "authorization" not in headers[0], "azure key auth must not ride a Bearer header"
+
+
+_SPEECH_STT_PATH = "/speechtotext/transcriptions:transcribe?api-version=2024-11-15"
+
+
+def test_probe_url_keeps_a_speech_transcription_url_verbatim():
+    """C4: an Azure Speech fast-transcription URL bakes its operation AND query string into the
+    configured value, exactly like the Azure OpenAI shape — append nothing."""
+    speech = f"https://northeurope.api.cognitive.microsoft.com{_SPEECH_STT_PATH}"
+    assert cp.probe_url(speech, _STT_PATH) == speech
+
+
+def test_probe_requests_a_speech_url_verbatim_with_subscription_key_auth():
+    """C4: against a Speech fast-transcription URL the probe must ask what the bot's client asks —
+    the configured path plus query string, once, authenticated with ``Ocp-Apim-Subscription-Key``
+    (Speech's key header; both ``api-key`` and Bearer answer 401 there)."""
+    with _ProbeServer(routes={_SPEECH_STT_PATH: 400}) as srv:
+        env = {"TRANSCRIPTION_SERVICE_URL": srv.base + _SPEECH_STT_PATH,
+               "TRANSCRIPTION_SERVICE_TOKEN": "tok"}
+        result = cp._http_probe(_stt_probe_spec()["http"], env, timeout=5)
+        requested = list(srv.paths)
+        headers = list(srv.headers_seen)
+    assert result["ok"] is True, f"speech-shaped URL must probe green: {result}"
+    assert requested == [_SPEECH_STT_PATH], f"expected the verbatim speech path once, got {requested}"
+    assert headers[0].get("ocp-apim-subscription-key") == "tok"
+    assert "api-key" not in headers[0], "speech key auth must not ride the api-key header"
+    assert "authorization" not in headers[0], "speech key auth must not ride a Bearer header"
+
+
+def test_probe_sends_the_speech_envelope_to_a_speech_url():
+    """The fast-transcription API takes ONE file part named ``audio`` plus a ``definition`` JSON
+    field; the OpenAI-compatible ``model``/``response_format`` fields are not served there."""
+    with _ProbeServer(routes={_SPEECH_STT_PATH: 400}) as srv:
+        env = {"TRANSCRIPTION_SERVICE_URL": srv.base + _SPEECH_STT_PATH,
+               "TRANSCRIPTION_SERVICE_TOKEN": "tok"}
+        cp._http_probe(_stt_probe_spec()["http"], env, timeout=5)
+        body = srv.bodies_seen[0]
+    assert b'name="audio"' in body, "the speech probe must name its file part audio"
+    assert b'name="definition"' in body, "the speech probe must carry a definition field"
+    assert b'name="model"' not in body
+    assert b'name="response_format"' not in body
+
+
+def test_probe_401_from_a_speech_url_is_a_rejected_credential():
+    with _ProbeServer(routes={_SPEECH_STT_PATH: 401}) as srv:
+        env = {"TRANSCRIPTION_SERVICE_URL": srv.base + _SPEECH_STT_PATH,
+               "TRANSCRIPTION_SERVICE_TOKEN": "bad"}
+        rejected = cp._http_probe(_stt_probe_spec()["http"], env, timeout=5)
+    assert rejected["ok"] is False and rejected["status"] == 401
 
 
 # ── C3 (#511): a spawn against a SET-but-BROKEN backend refuses with the probe's reason ─────────

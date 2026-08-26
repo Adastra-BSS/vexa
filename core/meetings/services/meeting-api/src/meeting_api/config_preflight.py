@@ -147,16 +147,26 @@ def is_azure_deployment_url(url: str) -> bool:
     return "/openai/deployments/" in (url or "")
 
 
+def is_speech_transcription_url(url: str) -> bool:
+    """Azure AI Speech fast transcription is the third accepted envelope: the operation and the
+    api-version are baked into the configured URL
+    (``https://{region}.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=...``),
+    the key rides ``Ocp-Apim-Subscription-Key``, and the body is one ``audio`` file part plus a
+    ``definition`` JSON field — no OpenAI-compatible fields. Same single-predicate switch the bot's
+    client keys on (``whisper/src/transcription-client.ts``)."""
+    return "/speechtotext/" in (url or "")
+
+
 def probe_url(base: str, path: str) -> str:
     """Join a configured base URL to the probe's declared path, accepting EVERY accepted shape:
     a bare base (``https://api.openai.com``), a full endpoint URL that already carries the path
-    (``https://api.openai.com/v1/audio/transcriptions``), and an Azure deployment URL, which
-    carries its own path plus query string. Appending blindly would double-path the non-bare
-    shapes into a 404 — the same URL that works in a meeting. This is the ONE rule, shared with
-    the bot's client (``whisper/src/transcription-client.ts``) and the terminal's dictation
-    route."""
+    (``https://api.openai.com/v1/audio/transcriptions``), an Azure deployment URL, and an Azure
+    Speech fast-transcription URL — the latter two carry their own path plus query string.
+    Appending blindly would double-path the non-bare shapes into a 404 — the same URL that works
+    in a meeting. This is the ONE rule, shared with the bot's client
+    (``whisper/src/transcription-client.ts``) and the terminal's dictation route."""
     base = (base or "").strip().rstrip("/")
-    if not path or is_azure_deployment_url(base):
+    if not path or is_azure_deployment_url(base) or is_speech_transcription_url(base):
         return base
     return base if base.endswith(path) else base + path
 
@@ -194,14 +204,23 @@ def audio_probe_body(model: str = "whisper-1") -> tuple:
     return _multipart({"model": model, "response_format": "json"}, "probe.wav", _probe_wav())
 
 
-def _multipart(fields: Mapping[str, str], filename: str, payload: bytes) -> tuple:
+def speech_probe_body() -> tuple:
+    """The Speech fast-transcription probe body: one ``audio`` file part plus an empty
+    ``definition`` object (no locale hardcoded into the shared contract — the service falls back
+    to language identification, and even a 400 on the definition still proves reachability and
+    accepted auth, which is all the probe grades)."""
+    return _multipart({"definition": "{}"}, "probe.wav", _probe_wav(), file_field="audio")
+
+
+def _multipart(fields: Mapping[str, str], filename: str, payload: bytes,
+               file_field: str = "file") -> tuple:
     """Encode one file + simple fields as multipart/form-data (urllib has no encoder, and this file
     takes no dependencies). Returns (content_type, body)."""
     boundary = "----ConfigV1Probe0dcb1f7a"
     out = bytearray()
     for k, v in fields.items():
         out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
-    out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+    out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
             f"filename=\"{filename}\"\r\nContent-Type: audio/wav\r\n\r\n").encode()
     out += payload + b"\r\n"
     out += f"--{boundary}--\r\n".encode()
@@ -236,13 +255,18 @@ def _http_probe(spec: dict, env: Mapping[str, str], timeout: float) -> dict:
     body = b""
     content_type = None
     if (spec.get("payload") or "") == "audio":
-        content_type, body = audio_probe_body(spec.get("payload_model") or "whisper-1")
+        if is_speech_transcription_url(url):
+            content_type, body = speech_probe_body()
+        else:
+            content_type, body = audio_probe_body(spec.get("payload_model") or "whisper-1")
     req = urllib.request.Request(url, data=body, method=(spec.get("method") or "POST"))
     if content_type:
         req.add_header("Content-Type", content_type)
     token = (env.get(spec["auth_key"]) or "").strip() if spec.get("auth_key") else ""
     if token:
-        if is_azure_deployment_url(url):
+        if is_speech_transcription_url(url):
+            req.add_header("Ocp-Apim-Subscription-Key", token)
+        elif is_azure_deployment_url(url):
             req.add_header("api-key", token)
         else:
             req.add_header("Authorization", f"Bearer {token}")

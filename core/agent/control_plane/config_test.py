@@ -159,12 +159,18 @@ _STT_PATH = "/v1/audio/transcriptions"
 
 def _transcribe_probe(endpoint: str, token: str) -> tuple:
     """POST the shared audio probe body — the same request the boot preflight makes, auth header
-    included (Azure deployment URLs take ``api-key``, everything else a bearer token)."""
-    from control_plane.config_preflight import audio_probe_body, is_azure_deployment_url
+    included (Speech fast-transcription URLs take ``Ocp-Apim-Subscription-Key``, Azure deployment
+    URLs ``api-key``, everything else a bearer token)."""
+    from control_plane.config_preflight import (audio_probe_body, is_azure_deployment_url,
+                                                is_speech_transcription_url, speech_probe_body)
 
-    content_type, body = audio_probe_body()
-    auth = {"api-key": token} if is_azure_deployment_url(endpoint) \
-        else {"Authorization": f"Bearer {token}"}
+    if is_speech_transcription_url(endpoint):
+        content_type, body = speech_probe_body()
+        auth = {"Ocp-Apim-Subscription-Key": token}
+    else:
+        content_type, body = audio_probe_body()
+        auth = {"api-key": token} if is_azure_deployment_url(endpoint) \
+            else {"Authorization": f"Bearer {token}"}
     req = urllib.request.Request(
         endpoint, data=body, method="POST",
         headers={"Content-Type": content_type, **auth})
