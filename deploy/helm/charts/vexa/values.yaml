@@ -251,6 +251,14 @@ runtime:
     idleTimeoutSec: ""
   # Active-phase remote-audio silence window. Empty uses the bot's 10-minute default.
   aloneSilenceWindowMs: ""
+  # Requests/limits stamped onto every SPAWNED bot Pod (emitted as both requests AND limits).
+  # Empty = no resources block, today's behaviour - but then a dedicated bot pool's cluster
+  # autoscaler has nothing to scale on and every bot bin-packs onto one node. The memory limit
+  # must leave room for the memory-backed /dev/shm emptyDir (RUNTIME_K8S_SHM_SIZE, kernel
+  # default 2Gi), which counts against it.
+  botResources:
+    cpu: ""                     # cores per bot, e.g. "0.8"
+    memoryMb: ""                # MiB per bot, e.g. "2304"
   resources:
     requests: { cpu: 50m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 768Mi }

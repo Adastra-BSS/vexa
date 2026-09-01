@@ -74,6 +74,13 @@ spec:
               value: {{ .Values.runtime.speakerStream.maxBufferSec | default "" | quote }}
             - name: BOT_SPEAKER_IDLE_TIMEOUT_SEC
               value: {{ .Values.runtime.speakerStream.idleTimeoutSec | default "" | quote }}
+            # Deployment-default requests/limits for each SPAWNED bot Pod (profiles.py
+            # _bot_resources_from_env). Empty means the Pod carries no resources block - on an
+            # autoscaled pool that also means the autoscaler never scales for bots.
+            - name: BOT_CPU
+              value: {{ .Values.runtime.botResources.cpu | default "" | quote }}
+            - name: BOT_MEMORY_MB
+              value: {{ .Values.runtime.botResources.memoryMb | default "" | quote }}
             - name: INTERNAL_API_SECRET
               valueFrom:
                 secretKeyRef:

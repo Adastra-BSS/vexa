@@ -196,8 +196,11 @@ class Runtime:
             # layered on top so an explicit spec value always wins. Without this merge the base_env
             # never reaches the spawned pod and chart-set tuning is dead config (issue #771).
             effective_env = {**profile.base_env, **spec.env}
+            # Same layering for resources: the profile's deployment default applies unless the
+            # spec names its own (the control plane never does today - see profiles.py).
+            effective_resources = spec.resources if spec.resources is not None else profile.resources
             self._handles[spec.workloadId] = self.backend.start(
-                spec.workloadId, runnable, effective_env, resources=spec.resources)
+                spec.workloadId, runnable, effective_env, resources=effective_resources)
         except Exception as exc:
             # Record the honest terminal state (persist + emit) FIRST — GET /workloads and the
             # callback stream must still see stopped/start_failed — THEN raise so the API answers a

@@ -20,6 +20,8 @@ import shlex
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
+from .models import Resources
+
 
 @dataclass(frozen=True)
 class Runnable:
@@ -37,6 +39,11 @@ class Profile:
     max_lifetime_sec: Optional[int] = None
     # Base env the profile always sets; the spec's env is layered on top at create() time.
     base_env: dict[str, str] = field(default_factory=dict)
+    # Deployment-default requests/limits for the spawned Pod; a spec carrying its own resources
+    # wins. Without a default here a bot Pod requests nothing, so the scheduler bin-packs every
+    # bot onto one node and the cluster autoscaler never sees a reason to add another (a
+    # zero-request Pod always "fits") - the pool's autoscaling is dead config.
+    resources: Optional[Resources] = None
 
 
 class ProfileRegistry:
@@ -87,6 +94,23 @@ def worker_image_for(agent_image: str) -> str:
     return f"{repo}{sep}{tag}"
 
 
+def _bot_resources_from_env() -> Optional[Resources]:
+    """The meeting-bot's deployment-default Pod sizing, from BOT_CPU (cores, e.g. "0.8") and
+    BOT_MEMORY_MB (MiB, e.g. "2304") - rendered onto the runtime pod by the chart like the
+    BOT_SPEAKER_* tuning. Unset or empty means no default, which preserves today's behaviour
+    (spawned Pods carry no resources block at all). Note the k8s backend emits these as BOTH
+    requests and limits, and the memory limit must leave room for the memory-backed /dev/shm
+    emptyDir (RUNTIME_K8S_SHM_SIZE) Chromium writes into."""
+    cpu = os.environ.get("BOT_CPU", "").strip()
+    memory_mb = os.environ.get("BOT_MEMORY_MB", "").strip()
+    if not cpu and not memory_mb:
+        return None
+    return Resources(
+        cpu=float(cpu) if cpu else None,
+        memoryMb=int(memory_mb) if memory_mb else None,
+    )
+
+
 def default_registry() -> ProfileRegistry:
     """The real, deployment-shaped registry. Images come from env (no `:latest` fallback — a missing
     image surfaces as an empty string the backend rejects, matching 0.11's fail-visible stance)."""
@@ -96,6 +120,7 @@ def default_registry() -> ProfileRegistry:
     # agent-api image). The Docker backend ensures it is present at startup, pulling it when absent
     # (build_production_app → DockerBackend.ensure_worker_image).
     agent_worker_image = worker_image_for(agent_image)
+    bot_resources = _bot_resources_from_env()
     bot_tuning_env = {
         key: os.environ[key]
         for key in (
@@ -128,6 +153,7 @@ def default_registry() -> ProfileRegistry:
                 ),
                 idle_timeout_sec=0,  # 0 ⇒ managed externally; enforcement skips it
                 base_env=bot_tuning_env,
+                resources=bot_resources,
             ),
             # Claude Code agent — the in-container worker harness (worker): consumes the
             # dispatch from env, runs the governed turn over the mounted workspace, XADDs UnitEvents to

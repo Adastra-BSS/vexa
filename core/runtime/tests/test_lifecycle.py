@@ -78,6 +78,8 @@ class _FakeBackend:
     def start(self, workload_id, runnable, env, resources=None):
         self.starts.append(workload_id)
         self.envs[workload_id] = dict(env)
+        self.resources = getattr(self, "resources", {})
+        self.resources[workload_id] = resources
         self.exit_codes[workload_id] = None
         return WorkloadHandle(id=workload_id, impl=workload_id)
 
@@ -127,6 +129,31 @@ def test_create_respawns_after_self_exit():
     respawned = rt.create(WorkloadSpec(workloadId="w1", profile="test", env={}))
     assert respawned.state is RuntimeState.running
     assert be.starts == ["w1", "w1"]                    # exit-reflection let the re-create spawn
+
+
+def test_profile_default_resources_reach_the_backend_and_spec_wins():
+    """The profile's deployment-default sizing must arrive at the backend the same way base_env
+    does, and a spec naming its own resources must override it."""
+    from runtime_kernel.models import Resources
+    from runtime_kernel.profiles import Profile, ProfileRegistry, Runnable
+
+    default = Resources(cpu=0.8, memoryMb=2304)
+    reg = ProfileRegistry({
+        "meeting-bot": Profile(
+            name="meeting-bot",
+            runnable=Runnable(image="bot:img", command=None),
+            resources=default,
+        )
+    })
+    be = _FakeBackend()
+    rt = Runtime(backend=be, profiles=reg)
+
+    rt.create(WorkloadSpec(workloadId="w1", profile="meeting-bot", env={}))
+    assert be.resources["w1"] == default
+
+    explicit = Resources(cpu=2.0)
+    rt.create(WorkloadSpec(workloadId="w2", profile="meeting-bot", env={}, resources=explicit))
+    assert be.resources["w2"] == explicit
 
 
 def test_profile_base_env_reaches_the_spawn_env():

@@ -70,6 +70,24 @@ def test_meeting_bot_forwards_speaker_stream_tuning(monkeypatch):
     }
 
 
+def test_meeting_bot_carries_deployment_default_resources(monkeypatch):
+    """BOT_CPU/BOT_MEMORY_MB (chart: runtime.botResources) become the profile's default Pod sizing.
+    Without them a spawned bot requests nothing, so a dedicated pool's cluster autoscaler never
+    scales - the sizing has to survive from env into the Profile for create() to apply it."""
+    monkeypatch.setenv("BOT_CPU", "0.8")
+    monkeypatch.setenv("BOT_MEMORY_MB", "2304")
+    resources = default_registry().get("meeting-bot").resources
+    assert resources is not None
+    assert resources.cpu == 0.8
+    assert resources.memoryMb == 2304
+
+
+def test_meeting_bot_resources_default_to_none(monkeypatch):
+    monkeypatch.delenv("BOT_CPU", raising=False)
+    monkeypatch.delenv("BOT_MEMORY_MB", raising=False)
+    assert default_registry().get("meeting-bot").resources is None
+
+
 def test_meeting_bot_env_is_a_valid_invocation():
     """The bot's whole config is delivered as VEXA_BOT_CONFIG — a JSON-encoded Invocation. Build the
     env the control plane would hand the profile and prove the payload conforms to invocation.v1."""
