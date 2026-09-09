@@ -1,0 +1,36 @@
+# Builds the jana-pilot images and chart into the shared registry on every push to the branch.
+# The build itself is acb.yaml, executed inside the registry by `az acr run` - the same steps the
+# per-registry ACR task used to run, minus the webhook and the PAT. The identity this logs in as
+# (id-vexa-publisher, Contributor on that one registry) and the variables below are created by
+# jana-aickova's scripts/bootstrap_shared_registry.sh.
+#
+# The context is the pushed commit's git URL rather than the checkout: acb.yaml tags every image
+# with {{.Run.Commit}}, which ACR only fills in for a git context. The repo is public, so no token.
+name: Build jana-pilot
+
+on:
+  push:
+    branches: [jana-pilot]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: build-jana-pilot
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - run: >
+          az acr run --registry "${{ vars.ACR_NAME }}" --file acb.yaml --platform linux/amd64
+          --timeout 7200 "https://github.com/${{ github.repository }}.git#${{ github.sha }}"
