@@ -1,362 +1,245 @@
+/**
+ * VideoRecordingService — x11grab + PulseAudio capture, emitted as recording.v1 chunks.
+ *
+ * ONE ffmpeg captures the bot's Xvfb display AND the meeting audio (record_sink.monitor) in a single
+ * process, so both streams share one clock: lip-sync is inherent, with no server-side offset and no
+ * post-hoc mux step to get wrong.
+ *
+ * WHY SEGMENTS RATHER THAN ONE FILE. The previous shape wrote a single file and uploaded it after the
+ * meeting. Two problems, and the second is the one that bites in practice:
+ *   - a SIGKILLed / OOMed / evicted bot loses the whole recording, and a plain mp4 killed mid-write is
+ *     not even playable (its index is written last);
+ *   - even a GRACEFUL stop has only the signal handler's force-exit budget (<25s) to push the bytes,
+ *     which an hour of 1080p will not fit.
+ * Uploading each segment the moment it is written removes both: the chunks are already on the server,
+ * and the master is assembled there on read (finalize_master is re-assemblable, not write-once).
+ *
+ * WHY THE HLS MUXER. It is used ONLY as a segmenter, never served as HLS: `-hls_segment_type fmp4`
+ * writes `init.mp4` plus `chunk-NNNNN.m4s` fragments whose PLAIN BYTE CONCATENATION is a valid
+ * fragmented mp4 (this is what CMAF is). That is exactly what meeting-api's existing master builder
+ * does for non-wav formats, so video needs no new assembly path — chunk 0 is the init segment and the
+ * fragments follow in seq order. The playlist is written but ignored and never uploaded.
+ *
+ * Codec is h264 + aac, fixed: the only combination that plays natively everywhere, including the
+ * SharePoint/Stream player the harvest publishes into. Hardware encoding stays selectable because the
+ * encode is the dominant CPU cost of a video bot, and a bot pool sized for audio has none spare.
+ *
+ * The meeting audio reaches ffmpeg because setup-pulseaudio-sinks.sh makes `record_sink` the default
+ * output, so Chromium renders there; `record_sink.monitor` is its capture source.
+ */
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import http from 'http';
-import https from 'https';
 import { log } from './log';
 
-/**
- * Hardware acceleration modes for video encoding.
- * Controlled via VIDEO_HWACCEL env var (default: 'none').
- *   none  — software encoding (libvpx-vp9 → webm). Works everywhere.
- *   vaapi — Intel iGPU / AMD via VA-API (h264_vaapi → mp4). Requires /dev/dri passthrough.
- *   nvenc — NVIDIA via NVENC (h264_nvenc → mp4). Requires nvidia runtime.
- */
+/** Hardware encode selection (VIDEO_HWACCEL). `none` = libx264, the case the bot pool is sized on. */
 export type VideoHwAccel = 'none' | 'vaapi' | 'nvenc';
 
-/**
- * VideoRecordingService captures the Xvfb display using ffmpeg x11grab and
- * encodes to a video file. This works uniformly across Google Meet, Teams,
- * and Zoom Web since all three render into the same virtual display.
- *
- * Usage:
- *   const svc = new VideoRecordingService(meetingId, sessionUid);
- *   svc.start();
- *   // ... meeting runs ...
- *   await svc.stop();
- *   await svc.upload(uploadUrl, token);
- *   await svc.cleanup();
- */
-export class VideoRecordingService {
-  private filePath: string;
-  private format: string;
-  private ffmpegProcess: ChildProcess | null = null;
-  private isRunning = false;
-  private startTime = 0;
-  private display: string;
-  private hwaccel: VideoHwAccel;
-  private encodeH264: boolean;
+/** The init segment is always chunk 0; `chunk-NNNNN.m4s` takes chunk_seq NNNNN+1. */
+export const VIDEO_INIT_SEGMENT = 'init.mp4';
 
-  constructor(
-    private meetingId: number,
-    private sessionUid: string,
-  ) {
+/** recording.v1 `format` for the concatenated fragmented-mp4 master. */
+export const VIDEO_MEDIA_FORMAT = 'mp4';
+
+/** `chunk-NNNNN.m4s` name pattern — the only fragments the segmenter writes. */
+const FRAGMENT_NAME = /^chunk-(\d+)\.m4s$/;
+
+/**
+ * The recording.v1 chunk_seq a segment file must carry, or null when the name is not ours (the
+ * playlist ffmpeg also writes into this directory, and its temp files).
+ */
+export function seqForSegment(name: string): number | null {
+  if (name === VIDEO_INIT_SEGMENT) return 0;
+  const m = FRAGMENT_NAME.exec(name);
+  return m ? parseInt(m[1], 10) + 1 : null;
+}
+
+export interface VideoRecordingOptions {
+  meetingId: number;
+  sessionUid: string;
+  /**
+   * Fires once per fully-written segment. `seq` is the recording.v1 chunk_seq, derived from the
+   * FILENAME rather than the firing order — 0 for the init segment, NNNNN+1 for `chunk-NNNNN.m4s`
+   * — so a watcher event that arrives late or out of order still concatenates in the right place.
+   */
+  onSegment?: (seq: number, absPath: string) => void;
+}
+
+export class VideoRecordingService {
+  private proc: ChildProcess | null = null;
+  private running = false;
+  private startTime = 0;
+  private readonly dir: string;
+  private readonly display: string;
+  private readonly audioSource: string;
+  private readonly videoSize: string;
+  private readonly fps: string;
+  private readonly segmentSeconds: string;
+  private readonly hwaccel: VideoHwAccel;
+  private watcher: fs.FSWatcher | null = null;
+  /** Emitted segment filenames, so a duplicate fs.watch event cannot upload the same bytes twice. */
+  private emitted = new Set<string>();
+
+  public onSegment: VideoRecordingOptions['onSegment'];
+
+  constructor(opts: VideoRecordingOptions) {
+    this.onSegment = opts.onSegment;
     this.display = process.env.DISPLAY || ':99';
+    this.audioSource = process.env.RECORD_AUDIO_SOURCE || 'record_sink.monitor';
+    // Must match the bot's Xvfb geometry — x11grab cannot capture a region larger than the display.
+    this.videoSize = process.env.VIDEO_RESOLUTION || '1920x1080';
+    this.fps = process.env.VIDEO_FRAMERATE || '10';
+    this.segmentSeconds = process.env.RECORD_SEGMENT_SECONDS || '15';
     this.hwaccel = (process.env.VIDEO_HWACCEL || 'none').toLowerCase() as VideoHwAccel;
-    this.encodeH264 = process.env.ENCODE_H264 === 'true';
-    this.format = (this.hwaccel === 'none' && !this.encodeH264) ? 'webm' : 'mp4';
-    this.filePath = path.join('/tmp', `video_recording_${meetingId}_${sessionUid}.${this.format}`);
+    this.dir = path.join('/tmp', `video_${opts.meetingId}_${opts.sessionUid}`);
   }
 
   start(): void {
-    if (this.isRunning) {
-      log('[VideoRecording] Already running');
-      return;
-    }
+    if (this.running) { log('[VideoRecording] already running'); return; }
+    try { fs.mkdirSync(this.dir, { recursive: true }); } catch { /* exists */ }
 
-    const args = this.buildFfmpegArgs();
-    log(`[VideoRecording] Starting ffmpeg (hwaccel=${this.hwaccel}): ffmpeg ${args.join(' ')}`);
-
-    this.ffmpegProcess = spawn('ffmpeg', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    this.isRunning = true;
+    const args = this.buildArgs();  // throws on an unknown hwaccel (fail LOUD, not silently audio-only)
+    log(`[VideoRecording] starting ffmpeg (hwaccel=${this.hwaccel}, ${this.videoSize}@${this.fps}fps, ${this.segmentSeconds}s segments)`);
+    this.proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    this.running = true;
     this.startTime = Date.now();
 
-    this.ffmpegProcess.stderr?.on('data', (data: Buffer) => {
-      // ffmpeg writes progress to stderr; only log errors
-      const text = data.toString().trim();
-      if (text.includes('Error') || text.includes('error') || text.includes('failed')) {
-        log(`[VideoRecording] ffmpeg: ${text}`);
-      }
+    this.proc.stderr?.on('data', (d: Buffer) => {
+      const text = d.toString().trim();
+      if (/error|failed|invalid/i.test(text)) log(`[VideoRecording] ffmpeg: ${text}`);
     });
+    this.proc.on('exit', (code) => { this.running = false; log(`[VideoRecording] ffmpeg exited ${code}`); });
+    this.proc.on('error', (e) => { this.running = false; log(`[VideoRecording] ffmpeg spawn error: ${e.message}`); });
 
-    this.ffmpegProcess.on('exit', (code) => {
-      this.isRunning = false;
-      log(`[VideoRecording] ffmpeg exited with code ${code}`);
-    });
-
-    this.ffmpegProcess.on('error', (err) => {
-      this.isRunning = false;
-      log(`[VideoRecording] ffmpeg spawn error: ${err.message}`);
-    });
+    this.startWatcher();
   }
 
   /**
-   * Stop recording. Sends SIGTERM to ffmpeg which finalizes the output file
-   * before exiting. Returns the path to the recorded file.
+   * SIGTERM lets ffmpeg finish the segment it is writing, then we sweep the directory for anything
+   * the watcher did not catch. Resolves once every segment has been handed to `onSegment`.
    */
-  stop(): Promise<string> {
-    if (!this.ffmpegProcess || !this.isRunning) {
-      return Promise.resolve(this.filePath);
-    }
-
-    return new Promise((resolve) => {
-      const onExit = () => {
-        clearTimeout(forceKillTimer);
-        log('[VideoRecording] ffmpeg stopped gracefully');
-        resolve(this.filePath);
-      };
-
-      this.ffmpegProcess!.once('exit', onExit);
-
-      // SIGTERM tells ffmpeg to flush and finalize the output file
-      this.ffmpegProcess!.kill('SIGTERM');
-
-      // Force kill after 15 seconds if it doesn't exit cleanly
-      const forceKillTimer = setTimeout(() => {
-        log('[VideoRecording] ffmpeg did not exit in time, sending SIGKILL');
-        this.ffmpegProcess?.kill('SIGKILL');
-        resolve(this.filePath);
-      }, 15000);
-    });
-  }
-
-  /**
-   * Upload the video file to the meeting-api upload endpoint.
-   * Sends media_type: "video" so meeting-api stores it as a video MediaFile.
-   */
-  async upload(callbackUrl: string, token: string): Promise<void> {
-    if (!fs.existsSync(this.filePath)) {
-      log(`[VideoRecording] File not found for upload: ${this.filePath}`);
-      return;
-    }
-
-    const fileData = await fs.promises.readFile(this.filePath);
-    const fileStats = await fs.promises.stat(this.filePath);
-    const durationSeconds = (Date.now() - this.startTime) / 1000;
-
-    log(`[VideoRecording] Uploading ${fileStats.size} bytes (${durationSeconds.toFixed(1)}s) to ${callbackUrl}`);
-
-    const boundary = `----VexaVideoRecording${Date.now()}`;
-    const contentTypeMap: Record<string, string> = {
-      webm: 'video/webm',
-      mkv: 'video/x-matroska',
-      mp4: 'video/mp4',
-    };
-    const fileContentType = contentTypeMap[this.format] || 'video/webm';
-
-    const metadata = JSON.stringify({
-      meeting_id: this.meetingId,
-      session_uid: this.sessionUid,
-      media_type: 'video',
-      format: this.format,
-      duration_seconds: durationSeconds,
-      file_size_bytes: fileStats.size,
-      start_time_utc: this.startTime ? new Date(this.startTime).toISOString() : undefined,
-    });
-
-    const parts: Buffer[] = [];
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="metadata"\r\nContent-Type: application/json\r\n\r\n`));
-    parts.push(Buffer.from(metadata));
-    parts.push(Buffer.from('\r\n'));
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="video.${this.format}"\r\nContent-Type: ${fileContentType}\r\n\r\n`));
-    parts.push(fileData);
-    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
-
-    const body = Buffer.concat(parts);
-
-    return new Promise((resolve, reject) => {
-      const url = new URL(callbackUrl);
-      const transport = url.protocol === 'https:' ? https : http;
-      const req = transport.request(
-        {
-          hostname: url.hostname,
-          port: url.port,
-          path: url.pathname,
-          method: 'POST',
-          headers: {
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
-            'Authorization': `Bearer ${token}`,
-          },
-        },
-        (res) => {
-          let responseData = '';
-          res.on('data', (chunk) => { responseData += chunk; });
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              log(`[VideoRecording] Upload successful: ${res.statusCode}`);
-              resolve();
-            } else {
-              log(`[VideoRecording] Upload failed: ${res.statusCode} - ${responseData}`);
-              reject(new Error(`Video upload failed with status ${res.statusCode}: ${responseData}`));
-            }
-          });
-        }
-      );
-      req.on('error', (err) => {
-        log(`[VideoRecording] Upload error: ${err.message}`);
-        reject(err);
+  async stop(): Promise<void> {
+    if (this.proc && this.running) {
+      await new Promise<void>((resolve) => {
+        const done = () => { clearTimeout(force); resolve(); };
+        this.proc!.once('exit', done);
+        this.proc!.kill('SIGTERM');
+        // Deliberately short: the caller is inside the bot's shutdown budget, and every segment
+        // before this one is already uploaded, so losing the tail costs seconds, not the recording.
+        const force = setTimeout(() => { this.proc?.kill('SIGKILL'); resolve(); }, 10_000);
       });
-      req.write(body);
-      req.end();
-    });
-  }
-
-  /**
-   * Mux an audio file into the video, producing a self-contained file.
-   * Copies the video stream as-is and encodes audio (opus for webm, aac for mkv/mp4).
-   * Replaces this.filePath with the muxed output.
-   */
-  /**
-   * @param audioPath   Path to the finalized WAV file.
-   * @param audioDelayMs  Delay (in ms) to apply to the audio stream.
-   *   Positive = audio started later than video, so we pad silence at the start.
-   *   This keeps audio and video in sync when they didn't start at the same time.
-   */
-  async muxAudio(audioPath: string, audioDelayMs: number = 0): Promise<void> {
-    if (!fs.existsSync(this.filePath)) {
-      log(`[VideoRecording] Video file not found for muxing: ${this.filePath}`);
-      return;
     }
-    if (!fs.existsSync(audioPath)) {
-      log(`[VideoRecording] Audio file not found for muxing: ${audioPath}`);
-      return;
-    }
-
-    const muxedPath = this.filePath.replace(`.${this.format}`, `_muxed.${this.format}`);
-    const audioDelaySec = Math.max(0, audioDelayMs / 1000);
-
-    // -itsoffset delays the audio input so it aligns with the video timeline.
-    // Without this, audio that started later than video would play too early.
-    const args = [
-      '-y',
-      '-i', this.filePath,
-      ...(audioDelaySec > 0 ? ['-itsoffset', audioDelaySec.toFixed(3)] : []),
-      '-i', audioPath,
-      '-c:v', 'copy',
-      // Copy audio stream when possible; WAV/PCM must be encoded for webm/mkv containers.
-      '-c:a', audioPath.endsWith('.wav') ? (this.format === 'webm' ? 'libopus' : 'aac') : 'copy',
-      '-shortest',
-      muxedPath,
-    ];
-
-    log(`[VideoRecording] Muxing audio into video: ffmpeg ${args.join(' ')}`);
-
-    return new Promise((resolve) => {
-      const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      let stderr = '';
-      proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-      proc.on('exit', async (code) => {
-        if (code === 0 && fs.existsSync(muxedPath)) {
-          // Replace the original video-only file with the muxed one
-          try {
-            await fs.promises.unlink(this.filePath);
-          } catch {}
-          this.filePath = muxedPath;
-          const stats = fs.statSync(muxedPath);
-          log(`[VideoRecording] Muxed file ready: ${muxedPath} (${stats.size} bytes)`);
-        } else {
-          log(`[VideoRecording] Mux failed (code=${code}): ${stderr.slice(-500)}`);
-          // Keep the original video-only file for upload
-        }
-        resolve();
-      });
-      proc.on('error', (err) => {
-        log(`[VideoRecording] Mux spawn error: ${err.message}`);
-        resolve();
-      });
-    });
+    this.finalize();
   }
 
   async cleanup(): Promise<void> {
-    try {
-      if (fs.existsSync(this.filePath)) {
-        await fs.promises.unlink(this.filePath);
-        log(`[VideoRecording] Cleaned up ${this.filePath}`);
-      }
-    } catch (err: any) {
-      log(`[VideoRecording] Cleanup error: ${err.message}`);
-    }
+    try { await fs.promises.rm(this.dir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 
-  getFilePath(): string {
-    return this.filePath;
-  }
+  getStartTime(): number { return this.startTime; }
+  isActive(): boolean { return this.running; }
 
-  getStartTime(): number {
-    return this.startTime;
-  }
+  // ── ffmpeg ──────────────────────────────────────────────────────────────────
 
-  // ---------------------------------------------------------------------------
-
-  private buildFfmpegArgs(): string[] {
-    const fps = '10';
-    const inputSize = '1920x1080';
-
-    // Pre-input args (e.g. hwaccel flags that must appear before -i)
-    let preInputArgs: string[] = [];
-    let encoderArgs: string[];
-    let outputFile: string;
-
+  /** h264 encoder for the selected hwaccel. An unknown value throws rather than degrading silently. */
+  private videoEncoderArgs(): string[] {
     switch (this.hwaccel) {
-      case 'vaapi': {
-        // Intel iGPU / AMD Radeon via VA-API
-        // Requires /dev/dri/renderD128 device in container
-        encoderArgs = [
-          '-vaapi_device', '/dev/dri/renderD128',
-          '-vf', 'format=nv12,hwupload',
-          '-c:v', 'h264_vaapi',
-          '-qp', '28',
-        ];
-        outputFile = this.filePath; // .mp4
-        break;
-      }
-      case 'nvenc': {
-        // NVIDIA via NVENC — -hwaccel cuda must precede -i
-        preInputArgs = ['-hwaccel', 'cuda'];
-        encoderArgs = [
-          '-c:v', 'h264_nvenc',
-          '-cq', '28',
-          '-preset', 'p2',
-        ];
-        outputFile = this.filePath; // .mp4
-        break;
-      }
-      default: {
-        if (this.encodeH264) {
-          // CPU H.264 — universally supported including Safari
-          encoderArgs = [
-            '-c:v', 'libx264',
-            '-crf', '28',
-            '-preset', 'ultrafast',
-            '-tune', 'zerolatency',
-            '-pix_fmt', 'yuv420p',
-          ];
-        } else {
-          // Software VP9 — excellent compression for screen content
-          encoderArgs = [
-            '-c:v', 'libvpx-vp9',
-            '-pix_fmt', 'yuv420p', // VP9 profile 0 — required for Safari compatibility
-            '-crf', '35',
-            '-b:v', '0',
-            '-deadline', 'realtime',
-            '-cpu-used', '8',
-            '-row-mt', '1',
-          ];
-        }
-        outputFile = this.filePath; // .webm or .mp4
-        break;
-      }
+      case 'none':
+        // ultrafast/zerolatency keeps the encode to a fraction of a core; crf 28 is visually fine for
+        // a screen share and roughly halves the bitrate of the default.
+        return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '28', '-pix_fmt', 'yuv420p'];
+      case 'vaapi':
+        return ['-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-qp', '28'];
+      case 'nvenc':
+        return ['-c:v', 'h264_nvenc', '-preset', 'p2', '-cq', '28', '-pix_fmt', 'yuv420p'];
+      default:
+        throw new Error(`VIDEO_HWACCEL="${this.hwaccel}" unknown (none|vaapi|nvenc)`);
     }
+  }
 
-    // Common input: x11grab from the virtual display
-    const inputArgs = [
-      '-f', 'x11grab',
-      '-draw_mouse', '0',
-      '-framerate', fps,
-      '-video_size', inputSize,
-      '-i', this.display,
-    ];
-
+  private buildArgs(): string[] {
     return [
-      '-y',         // overwrite output file if exists
-      ...preInputArgs,
-      ...inputArgs,
-      ...encoderArgs,
-      '-an',        // no audio (audio is muxed in after recording stops)
-      outputFile,
+      '-y',
+      // Video: the bot's own Xvfb. Each bot has its own display, so concurrent bots cannot capture
+      // each other's screen. -draw_mouse 0 keeps a stray cursor out of the frame.
+      '-f', 'x11grab', '-draw_mouse', '0', '-framerate', this.fps, '-video_size', this.videoSize, '-i', this.display,
+      // Audio: the same sink the transcript capture reads, so the video carries the meeting audio.
+      '-f', 'pulse', '-i', this.audioSource,
+      '-map', '0:v:0', '-map', '1:a:0',
+      ...this.videoEncoderArgs(),
+      '-c:a', 'aac', '-b:a', '128k',
+      // Every segment must start on a keyframe, or the concatenated master is undecodable from that
+      // fragment onward.
+      '-force_key_frames', `expr:gte(t,n_forced*${this.segmentSeconds})`,
+      // The HLS muxer as a SEGMENTER only (see the file header): init.mp4 + .m4s fragments, whose
+      // byte concatenation is a valid fragmented mp4. The playlist is never uploaded.
+      '-f', 'hls',
+      '-hls_time', this.segmentSeconds,
+      '-hls_list_size', '0',
+      '-hls_segment_type', 'fmp4',
+      '-hls_flags', 'independent_segments',
+      '-hls_fmp4_init_filename', VIDEO_INIT_SEGMENT,
+      '-hls_segment_filename', path.join(this.dir, 'chunk-%05d.m4s'),
+      path.join(this.dir, 'playlist.m3u8'),
     ];
+  }
+
+  // ── segment discovery ───────────────────────────────────────────────────────
+
+  /**
+   * Emit segments as they become safe to read. ffmpeg writes `chunk-N` incrementally, so `chunk-N`
+   * appearing is the signal that `chunk-(N-1)` is complete; the init segment is complete as soon as
+   * the first fragment opens. The tail is swept by finalize() on stop.
+   */
+  private startWatcher(): void {
+    try {
+      this.watcher = fs.watch(this.dir, (_event, filename) => {
+        if (!filename) return;
+        const m = FRAGMENT_NAME.exec(filename.toString());
+        if (!m) return;
+        // init.mp4 is complete once ANY fragment has been opened — ffmpeg writes it first.
+        this.emit(VIDEO_INIT_SEGMENT);
+        const n = parseInt(m[1], 10);
+        if (n > 0) this.emit(`chunk-${String(n - 1).padStart(5, '0')}.m4s`);
+      });
+    } catch (e) {
+      log(`[VideoRecording] watcher failed, falling back to the stop-time sweep: ${String(e)}`);
+    }
+  }
+
+  /**
+   * Hand one segment to the uploader, once. Empty files are skipped — ffmpeg creates a segment
+   * before it writes it, so a zero-byte stat means "not ready", and a later event (or the stop-time
+   * sweep) picks it up.
+   *
+   * chunk_seq comes from the NAME, not from a counter: ffmpeg's `chunk-%05d` is already the write
+   * order, and deriving the seq from it means a dropped, duplicated or out-of-order watcher event
+   * cannot transpose two fragments. The server orders by chunk_seq, so correct placement survives.
+   */
+  private emit(name: string): void {
+    if (this.emitted.has(name)) return;
+    const seq = seqForSegment(name);
+    if (seq === null) return;
+    const abs = path.join(this.dir, name);
+    let size = 0;
+    try { size = fs.statSync(abs).size; } catch { return; }   // not written yet — a later event retries
+    if (size === 0) return;
+    this.emitted.add(name);
+    try { this.onSegment?.(seq, abs); } catch (e) { log(`[VideoRecording] onSegment error: ${String(e)}`); }
+  }
+
+  /**
+   * Close the watcher and sweep the directory for anything it missed — the init segment on a
+   * meeting too short to produce a fragment, the final fragment ffmpeg flushed on SIGTERM, and any
+   * event the watcher dropped. Idempotent (emit dedups by name).
+   */
+  private finalize(): void {
+    try { this.watcher?.close(); } catch { /* noop */ }
+    this.watcher = null;
+    this.emit(VIDEO_INIT_SEGMENT);
+    try {
+      const fragments = fs.readdirSync(this.dir).filter((f) => FRAGMENT_NAME.test(f)).sort();
+      for (const f of fragments) this.emit(f);
+    } catch { /* directory already cleaned */ }
   }
 }

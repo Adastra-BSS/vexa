@@ -226,6 +226,7 @@ export class RecordingService {
     chunkSeq: number,
     isFinal: boolean,
     format: string = 'webm',
+    mediaType: 'audio' | 'video' = 'audio',
   ): Promise<void> {
     const uploadTimeoutMs = 30_000;
     const durationSeconds = this.startTime > 0 ? (Date.now() - this.startTime) / 1000 : undefined;
@@ -234,6 +235,9 @@ export class RecordingService {
     const metadata = JSON.stringify({
       meeting_id: this.meetingId,
       session_uid: this.sessionUid,
+      // media_type keys the MediaFile server-side; absent, meeting-api defaults it to "audio", which
+      // is why the video path must send it explicitly or its chunks land on the audio media-file.
+      media_type: mediaType,
       format: format,
       sample_rate: this.sampleRate,
       channels: this.channels,
@@ -249,7 +253,7 @@ export class RecordingService {
     parts.push(Buffer.from('\r\n'));
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chunk_seq"\r\n\r\n${chunkSeq}\r\n`));
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="is_final"\r\n\r\n${isFinal ? 'true' : 'false'}\r\n`));
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.${chunkSeq}.${format}"\r\nContent-Type: audio/${format}\r\n\r\n`));
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.${chunkSeq}.${format}"\r\nContent-Type: ${mediaType}/${format}\r\n\r\n`));
     parts.push(chunkData);
     parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
 

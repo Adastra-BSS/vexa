@@ -100,12 +100,14 @@ RUN cd /build && node core/meetings/services/bot/warm-hf-cache.mjs
 FROM vexa/meet-join-env:dev AS runtime
 
 # The bot's OWN runtime deps NOT in the meet-join env: PulseAudio (the speak/TTS
-# + capture audio chain), fluxbox (a WM for the X11 session), and the aws CLI —
+# + capture audio chain), fluxbox (a WM for the X11 session), the aws CLI —
 # the authenticated-bot session store (@vexa/remote-browser session-store.ts)
 # shells out to `aws s3` to restore the signed-in profile before launch and write
 # it back on clean teardown; without the binary every authenticated spawn fails
-# at session-restore. The Playwright + humanized-X11 stack (xvfb·xdotool·xclip·
-# x11vnc·websockify) comes from the base.
+# at session-restore — and ffmpeg, which VideoRecordingService spawns to grab the
+# X display (x11grab) plus the PulseAudio monitor when video capture is on. The
+# Playwright + humanized-X11 stack (xvfb·xdotool·xclip·x11vnc·websockify) comes
+# from the base.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -113,8 +115,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
        fluxbox \
        socat \
        awscli \
+       ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
-    && aws --version
+    && aws --version \
+    && ffmpeg -hide_banner -version | head -1
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     DISPLAY=:99 \

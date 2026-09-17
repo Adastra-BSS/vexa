@@ -341,6 +341,10 @@ def build_router(
             content_type = "audio/wav"
         elif media_format == "webm":
             content_type = "audio/webm" if mf.get("type") == "audio" else "video/webm"
+        elif media_format == "mp4":
+            # The video path's fragmented-mp4 master. Served as video/mp4 so a browser (and the
+            # SharePoint player the harvest publishes into) plays it instead of downloading a blob.
+            content_type = "video/mp4"
         else:
             content_type = "application/octet-stream"
 

@@ -32,8 +32,9 @@ from .jsonb import (
 from .ports import RecordingRepo, Storage
 
 # Media content types (parent ``recording_codec._media_content_type``, reduced to the core set).
-_CONTENT_TYPES = {"webm": "video/webm", "wav": "audio/wav", "jsonl": "application/x-ndjson",
-                  "txt": "text/plain; charset=utf-8"}
+# ``mp4`` is the video path's fragmented-mp4 master (init segment + CMAF fragments, byte-concatenated).
+_CONTENT_TYPES = {"webm": "video/webm", "wav": "audio/wav", "mp4": "video/mp4",
+                  "jsonl": "application/x-ndjson", "txt": "text/plain; charset=utf-8"}
 
 # The ``media_type`` that means "a captured-signal tape, not playable media" (O-TEL-1).
 SIGNAL_MEDIA_TYPE = "signal"
