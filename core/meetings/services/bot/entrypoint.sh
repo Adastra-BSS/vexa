@@ -6,7 +6,8 @@
 # entrypoint.sh), trimmed to what the v0.12 carved bot needs:
 #   • Xvfb on :99           — a display for the headful Chromium @vexa/remote-browser launches.
 #   • fluxbox               — a WM so the browser window manages cleanly.
-#   • PulseAudio            — the audio graph: tts_sink → virtual_mic (speak) + a null sink.
+#   • PulseAudio            — the audio graph: tts_sink → virtual_mic (speak), and record_sink as
+#                             the default output, whose monitor a video capture records.
 # The worker itself reads VEXA_BOT_CONFIG (invocation.v1) and drives the rest.
 set -u
 
@@ -34,6 +35,21 @@ pactl load-module module-remap-source master=tts_sink.monitor source_name=virtua
 pactl set-default-source virtual_mic 2>/dev/null || true
 pactl set-sink-mute tts_sink 1 2>/dev/null || true
 pactl set-source-mute virtual_mic 1 2>/dev/null || true
+
+# record_sink — where the meeting is HEARD, so a screen capture can carry its sound.
+#
+# The transcript does not come through here and is unaffected: the page captures the meeting's
+# audio inside Chromium (record-chunker, MediaRecorder over the WebRTC streams) and never reads a
+# PulseAudio source. This sink exists only so ffmpeg has something to record when RECORD_VIDEO is
+# on: with no real audio device in the container, Chromium renders to the default sink, and a null
+# sink's `.monitor` is the loopback of whatever was played into it.
+#
+# Deliberately NOT muted, unlike tts_sink: muting a null sink silences its monitor, which would
+# leave the video mute for a reason nothing in the logs would explain. Best-effort like everything
+# above - when this fails the video capture falls back to silent rather than not running at all.
+pactl load-module module-null-sink sink_name=record_sink \
+  sink_properties=device.description="MeetingRecordSink" 2>/dev/null || true
+pactl set-default-sink record_sink 2>/dev/null || true
 
 # Run the worker from its package dir so the schema path (src→../../../contracts)
 # and the pnpm-linked workspace deps resolve. Always emit start + exit breadcrumbs

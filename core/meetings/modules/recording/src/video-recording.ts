@@ -24,10 +24,15 @@
  * SharePoint/Stream player the harvest publishes into. Hardware encoding stays selectable because the
  * encode is the dominant CPU cost of a video bot, and a bot pool sized for audio has none spare.
  *
- * The meeting audio reaches ffmpeg because setup-pulseaudio-sinks.sh makes `record_sink` the default
- * output, so Chromium renders there; `record_sink.monitor` is its capture source.
+ * The meeting audio reaches ffmpeg because the bot's entrypoint makes `record_sink` the default
+ * PulseAudio output, so Chromium renders the meeting there and `record_sink.monitor` is its loopback.
+ * That sink is best-effort, so the source is PROBED before ffmpeg starts and its absence drops the
+ * audio input rather than the capture: one ffmpeg with two mapped inputs exits when EITHER cannot be
+ * opened, so an unreadable monitor previously took the video down with it. A silent recording of the
+ * meeting is worth having; no recording is not. The transcript never comes through here - the page
+ * captures it inside Chromium - so nothing on this path can affect it either way.
  */
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { log } from './log';
@@ -98,8 +103,10 @@ export class VideoRecordingService {
     if (this.running) { log('[VideoRecording] already running'); return; }
     try { fs.mkdirSync(this.dir, { recursive: true }); } catch { /* exists */ }
 
-    const args = this.buildArgs();  // throws on an unknown hwaccel (fail LOUD, not silently audio-only)
-    log(`[VideoRecording] starting ffmpeg (hwaccel=${this.hwaccel}, ${this.videoSize}@${this.fps}fps, ${this.segmentSeconds}s segments)`);
+    const audio = this.resolveAudioSource();
+    const args = this.buildArgs(audio);  // throws on an unknown hwaccel (fail LOUD, not silently degraded)
+    log(`[VideoRecording] starting ffmpeg (hwaccel=${this.hwaccel}, ${this.videoSize}@${this.fps}fps, `
+      + `${this.segmentSeconds}s segments, audio=${audio ?? 'NONE — recording will be silent'})`);
     this.proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.running = true;
     this.startTime = Date.now();
@@ -157,17 +164,41 @@ export class VideoRecordingService {
     }
   }
 
-  private buildArgs(): string[] {
+  /**
+   * The PulseAudio source to record, or null to capture the screen alone.
+   *
+   * Asked of PulseAudio rather than assumed, because ffmpeg maps both inputs and dies when either
+   * cannot be opened: an absent sink would cost the whole recording, not just its sound. The sink
+   * is created best-effort by the bot's entrypoint, so "absent" is a state this must survive.
+   */
+  private resolveAudioSource(): string | null {
+    try {
+      const sources = execFileSync('pactl', ['list', 'short', 'sources'], {
+        encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const found = sources.split('\n').some((line) => line.split('\t')[1] === this.audioSource);
+      if (found) return this.audioSource;
+      log(`[VideoRecording] PulseAudio source "${this.audioSource}" is not present — capturing video only`);
+      return null;
+    } catch (e) {
+      log(`[VideoRecording] could not list PulseAudio sources (${String(e)}) — capturing video only`);
+      return null;
+    }
+  }
+
+  private buildArgs(audioSource: string | null): string[] {
     return [
       '-y',
       // Video: the bot's own Xvfb. Each bot has its own display, so concurrent bots cannot capture
       // each other's screen. -draw_mouse 0 keeps a stray cursor out of the frame.
       '-f', 'x11grab', '-draw_mouse', '0', '-framerate', this.fps, '-video_size', this.videoSize, '-i', this.display,
-      // Audio: the same sink the transcript capture reads, so the video carries the meeting audio.
-      '-f', 'pulse', '-i', this.audioSource,
-      '-map', '0:v:0', '-map', '1:a:0',
+      // Audio: the monitor of the sink Chromium renders the meeting into, so the video carries its
+      // sound. Omitted entirely when absent - a mapped input that cannot be opened is fatal.
+      ...(audioSource ? ['-f', 'pulse', '-i', audioSource] : []),
+      '-map', '0:v:0',
+      ...(audioSource ? ['-map', '1:a:0'] : []),
       ...this.videoEncoderArgs(),
-      '-c:a', 'aac', '-b:a', '128k',
+      ...(audioSource ? ['-c:a', 'aac', '-b:a', '128k'] : []),
       // Every segment must start on a keyframe, or the concatenated master is undecodable from that
       // fragment onward.
       '-force_key_frames', `expr:gte(t,n_forced*${this.segmentSeconds})`,
