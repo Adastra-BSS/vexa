@@ -227,9 +227,15 @@ export class RecordingService {
     isFinal: boolean,
     format: string = 'webm',
     mediaType: 'audio' | 'video' = 'audio',
+    durationSecondsOverride?: number,
   ): Promise<void> {
     const uploadTimeoutMs = 30_000;
-    const durationSeconds = this.startTime > 0 ? (Date.now() - this.startTime) / 1000 : undefined;
+    // Elapsed since THIS service started recording - or, for a caller using this purely as an
+    // uploader for media it captured itself, the elapsed it reports. The video path is that caller:
+    // it never calls start(), so its own clock is the only one that knows how long ffmpeg has run,
+    // and without it every video media file lands with a null duration.
+    const durationSeconds = durationSecondsOverride
+      ?? (this.startTime > 0 ? (Date.now() - this.startTime) / 1000 : undefined);
 
     const boundary = `----VexaRecordingChunk${Date.now()}${chunkSeq}`;
     const metadata = JSON.stringify({

@@ -53,6 +53,15 @@ export function startVideoRecording(inv: Invocation, log: (m: string) => void): 
   let lastSeq = -1;
 
   let svc: VideoRecordingService | null = null;
+  // Seconds of capture so far, from the CAPTURE's own clock. RecordingService derives this from
+  // its own start(), which this path never calls - it borrows the service purely as an uploader -
+  // so without passing it every video media file lands with a null duration, and nothing
+  // downstream can tell a whole meeting from the first ten seconds of one.
+  const elapsedSeconds = (): number | undefined => {
+    const t = svc?.getStartTime() ?? 0;
+    return t > 0 ? (Date.now() - t) / 1000 : undefined;
+  };
+
   try {
     svc = new VideoRecordingService({
       meetingId,
@@ -63,7 +72,7 @@ export function startVideoRecording(inv: Invocation, log: (m: string) => void): 
         queue = queue.then(async () => {
           try {
             const bytes = await fs.promises.readFile(absPath);
-            await uploader.uploadChunk(uploadUrl, token, bytes, seq, false, VIDEO_MEDIA_FORMAT, 'video');
+            await uploader.uploadChunk(uploadUrl, token, bytes, seq, false, VIDEO_MEDIA_FORMAT, 'video', elapsedSeconds());
             uploaded += 1;
           } catch (e) {
             // Skip, do not retry: the next fragment is already being written, and a stalled queue
@@ -93,7 +102,9 @@ export function startVideoRecording(inv: Invocation, log: (m: string) => void): 
         // uses. Sent only when something actually uploaded, so a capture that never produced a
         // fragment does not register an empty video media-file.
         try {
-          await uploader.uploadChunk(uploadUrl, token, Buffer.alloc(0), lastSeq + 1, true, VIDEO_MEDIA_FORMAT, 'video');
+          // Sent after stop(), so this elapsed is the recording's FINAL length - and the last
+          // chunk's value is the one the media file keeps.
+          await uploader.uploadChunk(uploadUrl, token, Buffer.alloc(0), lastSeq + 1, true, VIDEO_MEDIA_FORMAT, 'video', elapsedSeconds());
           log(`video-rec: finalized ${uploaded} fragment(s) (session ${sessionUid})`);
         } catch (e) {
           log(`video-rec: finalize failed (session ${sessionUid}): ${String(e)}`);
