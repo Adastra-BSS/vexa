@@ -68,6 +68,14 @@ export const JOIN_BROWSER_ARGS: readonly string[] = [
   "--disable-blink-features=AutomationControlled",
   "--disable-features=VizDisplayCompositor",
   "--disable-site-isolation-trials",
+  // The screen recording grabs the whole Xvfb display, not the browser window, so the window has
+  // to cover all of it. Without these the WM opens Chromium at roughly half the screen and the
+  // capture is mostly empty desktop plus the fluxbox toolbar. Kiosk also drops the tab strip, URL
+  // bar and infobars, leaving only the meeting in the frame. Must match the Xvfb geometry in the
+  // bot's entrypoint.sh.
+  "--window-position=0,0",
+  "--window-size=1920,1080",
+  "--kiosk",
 ];
 
 /** The canonical join launch args, as a fresh mutable array per call. Includes
