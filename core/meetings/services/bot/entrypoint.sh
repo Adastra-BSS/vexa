@@ -47,7 +47,12 @@ pactl set-source-mute virtual_mic 1 2>/dev/null || true
 # Deliberately NOT muted, unlike tts_sink: muting a null sink silences its monitor, which would
 # leave the video mute for a reason nothing in the logs would explain. Best-effort like everything
 # above - when this fails the video capture falls back to silent rather than not running at all.
-pactl load-module module-null-sink sink_name=record_sink \
+#
+# 48 kHz because that is what Chromium renders WebRTC audio at. Left to PulseAudio's 44.1 kHz
+# default, the meeting was resampled 48 -> 44.1 on the way in and back again on the way out to
+# ffmpeg, which is audible as distortion the in-browser recording (no PulseAudio hop) never has.
+# Keep VIDEO_AUDIO_SAMPLE_RATE equal to this so the encode does not add a third resample.
+pactl load-module module-null-sink sink_name=record_sink rate=48000 \
   sink_properties=device.description="MeetingRecordSink" 2>/dev/null || true
 pactl set-default-sink record_sink 2>/dev/null || true
 
