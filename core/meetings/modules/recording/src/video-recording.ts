@@ -78,7 +78,12 @@ export class VideoRecordingService {
   private readonly display: string;
   private readonly audioSource: string;
   private readonly videoSize: string;
+  private readonly outputHeight: string;
   private readonly fps: string;
+  private readonly preset: string;
+  private readonly crf: string;
+  private readonly audioBitrate: string;
+  private readonly audioRate: string;
   private readonly segmentSeconds: string;
   private readonly hwaccel: VideoHwAccel;
   private watcher: fs.FSWatcher | null = null;
@@ -91,9 +96,19 @@ export class VideoRecordingService {
     this.onSegment = opts.onSegment;
     this.display = process.env.DISPLAY || ':99';
     this.audioSource = process.env.RECORD_AUDIO_SOURCE || 'record_sink.monitor';
-    // Must match the bot's Xvfb geometry — x11grab cannot capture a region larger than the display.
+    // The CAPTURE geometry, which must match the bot's Xvfb display: x11grab selects a region, so a
+    // smaller value here crops rather than shrinks. Use VIDEO_OUTPUT_HEIGHT to make the file smaller.
     this.videoSize = process.env.VIDEO_RESOLUTION || '1920x1080';
+    // The stored height. 720 rather than the captured 1080 because a meeting is faces and shared
+    // slides, both legible at 720p, and the pixel count is a permanent storage cost.
+    this.outputHeight = process.env.VIDEO_OUTPUT_HEIGHT || '720';
     this.fps = process.env.VIDEO_FRAMERATE || '10';
+    this.preset = process.env.VIDEO_PRESET || 'veryfast';
+    this.crf = process.env.VIDEO_CRF || '28';
+    // 16 kHz mono at 48k: this is speech, and the transcript is produced at 16 kHz anyway. Stereo
+    // 128k triples the audio for a room where nobody is positioned in the stereo field.
+    this.audioBitrate = process.env.VIDEO_AUDIO_BITRATE || '48k';
+    this.audioRate = process.env.VIDEO_AUDIO_SAMPLE_RATE || '16000';
     this.segmentSeconds = process.env.RECORD_SEGMENT_SECONDS || '15';
     this.hwaccel = (process.env.VIDEO_HWACCEL || 'none').toLowerCase() as VideoHwAccel;
     this.dir = path.join('/tmp', `video_${opts.meetingId}_${opts.sessionUid}`);
@@ -105,8 +120,10 @@ export class VideoRecordingService {
 
     const audio = this.resolveAudioSource();
     const args = this.buildArgs(audio);  // throws on an unknown hwaccel (fail LOUD, not silently degraded)
-    log(`[VideoRecording] starting ffmpeg (hwaccel=${this.hwaccel}, ${this.videoSize}@${this.fps}fps, `
-      + `${this.segmentSeconds}s segments, audio=${audio ?? 'NONE — recording will be silent'})`);
+    log(`[VideoRecording] starting ffmpeg (hwaccel=${this.hwaccel}, capture ${this.videoSize}`
+      + ` -> ${this.scaleFilter() ? `${this.outputHeight}p` : 'native'}@${this.fps}fps, `
+      + `x264 ${this.preset} crf${this.crf}, ${this.segmentSeconds}s segments, `
+      + `audio=${audio ?? 'NONE — recording will be silent'})`);
     this.proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.running = true;
     this.startTime = Date.now();
@@ -148,17 +165,50 @@ export class VideoRecordingService {
 
   // ── ffmpeg ──────────────────────────────────────────────────────────────────
 
+  /**
+   * The output scale, as an ffmpeg filter, or null to encode at the captured size.
+   *
+   * A DOWNSCALE, never a smaller capture: `-video_size` on the x11grab input selects a REGION, so
+   * asking it for 1280x720 of a 1920x1080 display records the top-left corner and silently loses
+   * the rest of the meeting. The display is always captured whole and resized here instead.
+   *
+   * `-2` for the width keeps the aspect ratio and rounds to an even number, which h264 requires.
+   */
+  private scaleFilter(): string | null {
+    const target = parseInt(this.outputHeight, 10);
+    if (!Number.isFinite(target) || target <= 0) return null;
+    const captured = parseInt(this.videoSize.split('x')[1] ?? '', 10);
+    if (Number.isFinite(captured) && captured === target) return null;
+    return `scale=-2:${target}`;
+  }
+
   /** h264 encoder for the selected hwaccel. An unknown value throws rather than degrading silently. */
   private videoEncoderArgs(): string[] {
+    const scale = this.scaleFilter();
     switch (this.hwaccel) {
       case 'none':
-        // ultrafast/zerolatency keeps the encode to a fraction of a core; crf 28 is visually fine for
-        // a screen share and roughly halves the bitrate of the default.
-        return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '28', '-pix_fmt', 'yuv420p'];
+        // `preset` is the single biggest lever on file size, and the default is deliberately NOT
+        // ultrafast: measured on a real 25-minute standup, ultrafast produced ~4x the bytes of
+        // veryfast at identical resolution and crf, while both encode far faster than realtime. The
+        // CPU ultrafast buys is headroom a meeting-length encode never needs, and the storage it
+        // costs accumulates for as long as the recording is kept.
+        return [
+          ...(scale ? ['-vf', scale] : []),
+          '-c:v', 'libx264', '-preset', this.preset, '-crf', this.crf, '-pix_fmt', 'yuv420p',
+        ];
       case 'vaapi':
-        return ['-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-qp', '28'];
+        // The scale runs BEFORE the hwupload: once frames are on the GPU this filter chain cannot
+        // touch them.
+        return [
+          '-vaapi_device', '/dev/dri/renderD128',
+          '-vf', `${scale ? `${scale},` : ''}format=nv12,hwupload`,
+          '-c:v', 'h264_vaapi', '-qp', this.crf,
+        ];
       case 'nvenc':
-        return ['-c:v', 'h264_nvenc', '-preset', 'p2', '-cq', '28', '-pix_fmt', 'yuv420p'];
+        return [
+          ...(scale ? ['-vf', scale] : []),
+          '-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', this.crf, '-pix_fmt', 'yuv420p',
+        ];
       default:
         throw new Error(`VIDEO_HWACCEL="${this.hwaccel}" unknown (none|vaapi|nvenc)`);
     }
@@ -198,7 +248,7 @@ export class VideoRecordingService {
       '-map', '0:v:0',
       ...(audioSource ? ['-map', '1:a:0'] : []),
       ...this.videoEncoderArgs(),
-      ...(audioSource ? ['-c:a', 'aac', '-b:a', '128k'] : []),
+      ...(audioSource ? ['-c:a', 'aac', '-b:a', this.audioBitrate, '-ar', this.audioRate, '-ac', '1'] : []),
       // Every segment must start on a keyframe, or the concatenated master is undecodable from that
       // fragment onward.
       '-force_key_frames', `expr:gte(t,n_forced*${this.segmentSeconds})`,

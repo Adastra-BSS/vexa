@@ -137,7 +137,12 @@ def default_registry() -> ProfileRegistry:
             "RECORD_VIDEO",
             "RECORD_SEGMENT_SECONDS",
             "VIDEO_RESOLUTION",
+            "VIDEO_OUTPUT_HEIGHT",
             "VIDEO_FRAMERATE",
+            "VIDEO_PRESET",
+            "VIDEO_CRF",
+            "VIDEO_AUDIO_BITRATE",
+            "VIDEO_AUDIO_SAMPLE_RATE",
             "VIDEO_HWACCEL",
         )
         if os.environ.get(key, "").strip()
