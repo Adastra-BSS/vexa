@@ -890,7 +890,10 @@ export async function startCaptureBridge(
             }
             w.__vexaPerSpeakerAudioData(0, Array.from(pcm));
           };
-          Promise.resolve(w.VexaBrowserUtils.createMixedAudioCapture(w.__vexaMixDest.stream, meterAndForward))
+          // replay: false - the re-play exists for the extension, where capturing a tab silences it
+          // for the user. The bot has no listener, and a re-play is a second copy of the meeting in
+          // the PulseAudio sink the screen recording takes its soundtrack from, heard as an echo.
+          Promise.resolve(w.VexaBrowserUtils.createMixedAudioCapture(w.__vexaMixDest.stream, meterAndForward, { replay: false }))
             .then((cap: any) => {
               w.__vexaMixedCapture = cap;
               // THE CLOCK STARTS WHEN CAPTURE STARTS, NOT WHEN AUDIO ARRIVES.
