@@ -76,6 +76,13 @@ export const JOIN_BROWSER_ARGS: readonly string[] = [
   "--window-position=0,0",
   "--window-size=1920,1080",
   "--kiosk",
+  // Chromium plays the meeting into PulseAudio in small blocks, and while the page is busy
+  // rendering Teams it misses some of them - PulseAudio fills each miss with silence, which the
+  // screen recording's soundtrack (read from record_sink) carries as 5-16 ms holes that sound like
+  // distortion. A larger block absorbs those stalls at the price of ~40 ms of audio latency, which
+  // nothing here is sensitive to. The in-browser recording taps the audio before playback and is
+  // unaffected either way.
+  "--audio-buffer-size=2048",
 ];
 
 /** The canonical join launch args, as a fresh mutable array per call. Includes
