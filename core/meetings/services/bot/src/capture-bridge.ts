@@ -1177,7 +1177,16 @@ export function startVideoDiagnostics(page: Page, log: (m: string) => void = (m)
         source: v.srcObject ? 'stream' : (v.currentSrc ? 'url' : 'none'),
         shownWidth: Math.round(v.getBoundingClientRect?.().width ?? 0),
       }));
-      return { connections: pcs.length, videoReceivers, inboundVideo, videoElements };
+      // The video codecs this browser can negotiate. Teams video is H.264, which open-source Chromium
+      // builds (Playwright's included) may ship without; a list lacking video/H264 would explain a
+      // Teams call that negotiates no video, or drops when it tries.
+      const codecsOf = (caps: any): string[] =>
+        Array.from(new Set(((caps?.codecs ?? []) as any[]).map((c) => String(c.mimeType))));
+      const videoCodecs = {
+        receive: codecsOf(w.RTCRtpReceiver?.getCapabilities?.('video')),
+        send: codecsOf(w.RTCRtpSender?.getCapabilities?.('video')),
+      };
+      return { connections: pcs.length, videoCodecs, videoReceivers, inboundVideo, videoElements };
     }).then((snapshot) => log(`[video-diag] ${JSON.stringify(snapshot)}`))
       .catch(() => { /* page navigating or closed */ });
   }, VIDEO_DIAG_INTERVAL_MS);
