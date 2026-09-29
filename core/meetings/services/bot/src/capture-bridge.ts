@@ -43,6 +43,7 @@ import type { BotRecordingSink } from './recording.js';
 import type { TelemetrySink } from './ports.js';
 import type { RemoteAudioActivityTap } from './aloneness.js';
 import { createTtsPlayback } from './tts-playback.js';
+import { wantsVideoCapture } from './video-recording.js';
 
 /** Float32 PCM → base64 of its little-endian bytes — the EXACT codec wire payload, so a stored
  *  captured-signal.v1 frame round-trips through @vexa/capture-codec (encode→decode→same PCM). */
@@ -1102,9 +1103,12 @@ export async function startCaptureBridge(
       .catch(() => { /* the helper already swallows + observes */ });
   }
 
+  const stopVideoDiagnostics = wantsVideoCapture(inv) ? startVideoDiagnostics(page) : () => { /* video off */ };
+
   // Stop fn: tear the page-side capture down on teardown (best-effort; the page may be closing).
   return async () => {
     if (countersTimer) clearInterval(countersTimer);
+    stopVideoDiagnostics();
     activity?.unavailable();
     await page.evaluate(() => {
       const w = (globalThis as any) as Record<string, any>;
@@ -1127,6 +1131,57 @@ export async function startCaptureBridge(
       try { w.__vexaGmeetSpeakers?.destroy?.(); } catch { /* best-effort */ }
     }).catch(() => { /* page already gone */ });
   };
+}
+
+const VIDEO_DIAG_INTERVAL_MS = 10_000;
+
+/**
+ * Log a snapshot of the INCOMING video path every 10 s as `[video-diag] {...}`. Read-only: it
+ * queries WebRTC stats and the DOM and changes nothing on the page.
+ *
+ * The screen recording shows participants' cameras and screen shares only if the bot's Teams page
+ * draws them, and on Teams it never has. Three layers can each be the reason, and each snapshot
+ * shows all three: whether video tracks were negotiated at all (`videoReceivers`), whether video
+ * packets arrive and decode (`inboundVideo`), and whether the page has a playing <video> element
+ * with real dimensions (`videoElements`). The connections come from the audio hook's registry
+ * (`__vexa_peer_connections`), so nothing patches RTCPeerConnection a second time.
+ */
+export function startVideoDiagnostics(page: Page, log: (m: string) => void = (m) => console.log(m)): () => void {
+  const timer = setInterval(() => {
+    void page.evaluate(async () => {
+      const w = (globalThis as any) as Record<string, any>;
+      const pcs: any[] = Array.isArray(w.__vexa_peer_connections) ? w.__vexa_peer_connections : [];
+      const videoReceivers: Array<Record<string, unknown>> = [];
+      const inboundVideo: Array<Record<string, unknown>> = [];
+      for (const pc of pcs) {
+        try {
+          for (const r of pc.getReceivers?.() ?? []) {
+            if (r.track?.kind === 'video') {
+              videoReceivers.push({ state: r.track.readyState, muted: r.track.muted, enabled: r.track.enabled });
+            }
+          }
+          const stats = await pc.getStats();
+          stats.forEach((s: any) => {
+            if (s.type === 'inbound-rtp' && (s.kind === 'video' || s.mediaType === 'video')) {
+              inboundVideo.push({
+                packets: s.packetsReceived, bytes: s.bytesReceived, framesReceived: s.framesReceived,
+                framesDecoded: s.framesDecoded, framesDropped: s.framesDropped, width: s.frameWidth,
+                height: s.frameHeight, fps: s.framesPerSecond, decoder: s.decoderImplementation,
+              });
+            }
+          });
+        } catch { /* a closed connection has no stats */ }
+      }
+      const videoElements = Array.from(w.document?.querySelectorAll?.('video') ?? []).map((v: any) => ({
+        width: v.videoWidth, height: v.videoHeight, readyState: v.readyState, paused: v.paused,
+        source: v.srcObject ? 'stream' : (v.currentSrc ? 'url' : 'none'),
+        shownWidth: Math.round(v.getBoundingClientRect?.().width ?? 0),
+      }));
+      return { connections: pcs.length, videoReceivers, inboundVideo, videoElements };
+    }).then((snapshot) => log(`[video-diag] ${JSON.stringify(snapshot)}`))
+      .catch(() => { /* page navigating or closed */ });
+  }, VIDEO_DIAG_INTERVAL_MS);
+  return () => clearInterval(timer);
 }
 
 /**
