@@ -64,7 +64,14 @@ export const JOIN_BROWSER_ARGS: readonly string[] = [
   // Start AudioContexts in 'running', not 'suspended' — the capture taps remote participant audio
   // via createMediaStreamSource; without this the worklet never fires and no PCM flows. (L4.)
   "--autoplay-policy=no-user-gesture-required",
-  "--use-file-for-fake-video-capture=/dev/null",
+  // A fake camera (and mic) so Teams treats the bot as a full client. With no camera device the bot
+  // joins through "Continue without audio or video" and Teams negotiates NO video with it at all -
+  // no video transceivers, no inbound video, no <video> elements (measured by [video-diag]) - so
+  // participants' cameras and screen shares can never reach the screen recording. The bot's own
+  // camera is still switched off in the pre-join screen and its mic muted after join, so the fake
+  // test pattern and tone are never sent. The fake mic replaces the PulseAudio virtual_mic as the
+  // capture source, which the speak path relies on.
+  "--use-fake-device-for-media-stream",
   "--disable-blink-features=AutomationControlled",
   "--disable-features=VizDisplayCompositor",
   "--disable-site-isolation-trials",

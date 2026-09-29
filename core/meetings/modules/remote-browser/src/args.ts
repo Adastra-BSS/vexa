@@ -38,7 +38,6 @@ export function getAuthenticatedBrowserArgs(): string[] {
     '--disable-site-isolation-trials',
     '--in-process-gpu',
     '--use-fake-ui-for-media-stream',
-    '--use-file-for-fake-video-capture=/dev/null',
     '--disable-features=VizDisplayCompositor',
     '--password-store=basic',
   ];
