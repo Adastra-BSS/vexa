@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from .ports import ARTIFACT_DATA_KEYS
+
 
 def _segment_to_api(seg: dict) -> dict:
     """A stored segment → api.v1 ``TranscriptionSegment`` (start/end/text/language required)."""
@@ -569,7 +571,7 @@ class InMemoryTranscriptStore:
             return False
         m["segments"] = {}
         data = dict(m.get("data") or {})
-        for key in ("recordings", "processed", "notes", "share_grants", "transcript_viewers"):
+        for key in ARTIFACT_DATA_KEYS:
             data.pop(key, None)
         data["artifact_deletion"] = {
             "state": "completed",

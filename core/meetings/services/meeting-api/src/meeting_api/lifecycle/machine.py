@@ -22,6 +22,11 @@ from typing import Any, Dict, List, Optional
 # bot_logs at 50 KiB, trimming the OLDEST lines first). 50 * 1024 bytes.
 _BOT_LOGS_BYTE_BUDGET = 50 * 1024
 
+# The bot's who-spoke-when timeline (for naming a post-call diarized transcript) is capped bot-side
+# at the same count; re-capped here so one misbehaving producer cannot bloat meeting.data. The
+# start of a meeting is kept, matching the bot, whose timeline stops growing once full.
+MAX_SPEAKER_EVENTS = 20_000
+
 
 class BotStatus(str, Enum):
     """lifecycle.v1 `BotStatus` — the bot's DOMAIN status (not the container's)."""
@@ -243,6 +248,8 @@ class MeetingRecord:
     #: What degraded the meeting without ending it — today the STT backend refusing chunks
     #: (kinds + counts + the backend's own detail), reported by the bot on the terminal event.
     stt_fault: Optional[Dict[str, Any]] = None
+    speaker_events: Optional[List[Dict[str, Any]]] = None
+    recording_t0_ms: Optional[int] = None
     # User intent (parent's `meeting.data.stop_requested`) — set by the DELETE/stop path, read
     # first by the exit classifier so a user stop is never mis-attributed as a failure.
     stop_requested: bool = False
@@ -281,6 +288,10 @@ class MeetingRecord:
             d["stop_requested"] = True
         if self.stt_fault is not None:
             d["stt_fault"] = dict(self.stt_fault)
+        if self.speaker_events is not None:
+            d["speaker_events"] = list(self.speaker_events)
+        if self.recording_t0_ms is not None:
+            d["recording_t0_ms"] = self.recording_t0_ms
         return d
 
 
@@ -505,6 +516,12 @@ class LifecycleSink:
             # lifecycle.v1 (additionalProperties: true), same as infra_fault.
             if event.get("stt_fault"):
                 rec.stt_fault = dict(event["stt_fault"])
+            # Who spoke when, in ms from the recording's t=0: the only way a transcript made after
+            # the call, from the recording alone, gets speaker names. Additive, like stt_fault.
+            if isinstance(event.get("speaker_events"), list) and event["speaker_events"]:
+                rec.speaker_events = [dict(e) for e in event["speaker_events"][:MAX_SPEAKER_EVENTS] if isinstance(e, dict)]
+            if isinstance(event.get("recording_t0_ms"), (int, float)):
+                rec.recording_t0_ms = int(event["recording_t0_ms"])
 
         rec.status = to
         rec.history.append(to)

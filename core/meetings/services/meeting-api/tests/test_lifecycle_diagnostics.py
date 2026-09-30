@@ -254,3 +254,56 @@ def test_healthy_meeting_carries_no_stt_fault():
         "completion_reason": "stopped",
     })[-1]
     assert "stt_fault" not in final["data"]
+
+
+# ── the SPEAKER TIMELINE: who spoke when, for the post-call transcription ───────────────────────
+# With in-call STT off, the bot's record of whose tile was lit when is the only way a post-call
+# diarized transcript gets names. It rides the terminal event (additive on lifecycle.v1) and has to
+# be persisted, not accepted-and-dropped like every key the machine does not copy.
+
+_TIMELINE = [
+    {"name": "Woller, David", "start_ms": 1000, "end_ms": 6000},
+    {"name": "Eichler, Petr", "start_ms": 7000, "end_ms": 9000},
+]
+
+
+def test_the_terminal_event_persists_the_speaker_timeline():
+    terminal = {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "stopped",
+        "speaker_events": _TIMELINE,
+        "recording_t0_ms": 1780000000000,
+    }
+    conforms(terminal, "LifecycleEvent")
+
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, terminal)[-1]
+
+    assert final["data"]["speaker_events"] == _TIMELINE
+    assert final["data"]["recording_t0_ms"] == 1780000000000
+
+
+def test_an_oversized_timeline_is_capped_keeping_the_start_of_the_meeting():
+    """The bot caps its own timeline; this is the control plane refusing to trust that it did."""
+    from meeting_api.lifecycle.machine import MAX_SPEAKER_EVENTS
+
+    events = [{"name": "P", "start_ms": i * 10, "end_ms": i * 10 + 5} for i in range(MAX_SPEAKER_EVENTS + 10)]
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "stopped", "speaker_events": events, "recording_t0_ms": 1,
+    })[-1]
+
+    kept = final["data"]["speaker_events"]
+    assert len(kept) == MAX_SPEAKER_EVENTS
+    assert kept[0] == events[0]
+
+
+def test_a_meeting_without_a_timeline_carries_none():
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "stopped",
+    })[-1]
+    assert "speaker_events" not in final["data"]
+    assert "recording_t0_ms" not in final["data"]

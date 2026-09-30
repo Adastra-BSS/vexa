@@ -36,6 +36,7 @@ import { createBotRecordingSink } from './recording.js';
 import { createCaptureSignalRecorder, startBotLogSidecar, wrapTranscribeWithTap, wrapTranscriptWithSnapshot, type CaptureSignalRecorder } from './telemetry.js';
 import { uploadSignalTapes } from './signal-upload.js';
 import { createSttFaultReporter } from './stt-faults.js';
+import { createSpeakerTimeline } from './speaker-timeline.js';
 import { launchBrowser, startCaptureBridge, startRecording, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
 import { createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs } from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
@@ -217,6 +218,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   // Counts STT failures across the meeting so the terminal lifecycle event can carry WHY a
   // transcript is short or empty, instead of leaving it indistinguishable from a silent room.
   const sttFaults = createSttFaultReporter();
+  // Who spoke when, carried out on the terminal event for the post-call transcription to name its
+  // diarized voices from. Only a recorded meeting has an origin to place it in.
+  const speakerTimeline = createSpeakerTimeline();
   const speakerStreamConfig = speakerStreamConfigFromEnv(env);
   const remoteAudioActivity = createRemoteAudioActivityTap();
   const aloneSilenceWindowMs = resolveAloneSilenceWindowMs(inv.automaticLeave?.everyoneLeftTimeout, env);
@@ -280,8 +284,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // each failure surfaces LOUD via onFault (console with a full-fidelity serr(e)) instead of
     // throwing into the orchestrator's leave-on-fail backstop (which would hang the bot up).
     pipeline = createLivePipeline({
-      startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, publishChat, remoteAudioActivity),   // on the live meeting page
-      startRecording: rec ? () => startRecording(sess.page, inv, rec) : undefined,          // MediaRecorder → recording.v1
+      startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, publishChat, remoteAudioActivity, speakerTimeline),   // on the live meeting page
+      startRecording: rec ? () => startRecording(sess.page, inv, rec, (tMs) => speakerTimeline.markRecordingStart(tMs)) : undefined,          // MediaRecorder → recording.v1
       engine: bp,
       onFault: (stage, e) => {
         console.error(`[bot] live-pipeline: ${stage} failed (non-fatal, bot stays seated): ${serr(e)}`);
@@ -312,7 +316,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     aloneness,
     recording: recording as RecordingSink | undefined,
     reachability,
-    degraded: () => sttFaults.report(),
+    degraded: () => {
+      const faults = sttFaults.report();
+      const timeline = speakerTimeline.snapshot();
+      return faults || timeline.speaker_events ? { ...(faults ?? {}), ...timeline } : undefined;
+    },
   });
 
   // Disposability (P7): a termination signal ends the active phase gracefully (leave → flush →
