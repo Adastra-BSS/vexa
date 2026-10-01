@@ -120,6 +120,22 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && aws --version \
     && ffmpeg -hide_banner -version | head -1
 
+# Google Chrome beside Playwright's Chromium, chosen per deployment with BOT_BROWSER_CHANNEL=chrome.
+# Playwright's Chromium is built without H.264 (its WebRTC video codecs are VP8/VP9/AV1 only), and
+# Teams will not negotiate participant video with it, so cameras and screen shares never reach the
+# page or the screen recording. Chrome ships H.264. It is proprietary, which ADR-0004 lists as
+# Category X: this is here to prove the codec diagnosis on a dev stack, and needs a recorded
+# exception (or an H.264-capable open build) before an image carrying it goes anywhere else.
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSL -o /tmp/google-chrome.deb \
+       https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get install -y --no-install-recommends /tmp/google-chrome.deb \
+    && rm -f /tmp/google-chrome.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && google-chrome --version
+
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     DISPLAY=:99 \
     NODE_ENV=production

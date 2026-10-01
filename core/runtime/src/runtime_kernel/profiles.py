@@ -134,6 +134,8 @@ def default_registry() -> ProfileRegistry:
             "BOT_SPEAKER_CONFIRM_THRESHOLD",
             "BOT_SPEAKER_MAX_BUFFER_SEC",
             "BOT_SPEAKER_IDLE_TIMEOUT_SEC",
+            "BOT_BROWSER_CHANNEL",
+            "BOT_FAKE_CAMERA",
             "RECORD_VIDEO",
             "RECORD_SEGMENT_SECONDS",
             "VIDEO_RESOLUTION",
