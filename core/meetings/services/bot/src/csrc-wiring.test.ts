@@ -27,6 +27,7 @@ import {
   startCaptureBridge, makeCsrcSink, makeObservationSink,
   type CsrcRecord, type CsrcCapableSink, type ObservationRecord, type ObservationCapableSink,
 } from './capture-bridge.js';
+import { createRemoteAudioActivityTap } from './aloneness.js';
 import type { Invocation } from './config.js';
 import type { BotPipeline } from './pipeline.js';
 
@@ -84,6 +85,20 @@ const check = (name: string, cond: boolean, detail?: string) => {
   sink.sink('csrc', { kind: 'csrc-poll-error' }, 42);
   check('observation sink: a non-epoch timestamp is re-stamped AND warned',
     warnings.some((w) => w.includes('observation-clock-skew')) && stored[2].t >= t, warnings.join(' | '));
+}
+{
+  // The roster count is what tells an emptied room from a quiet one, so it must reach the aloneness
+  // tap on every lane, independently of whether the lane's transcriber wants it.
+  const activity = createRemoteAudioActivityTap();
+  const sink = makeObservationSink('mixed', undefined, () => {}, undefined, undefined, activity);
+  check('observation sink: no roster report leaves the participant count unknown',
+    activity.snapshot().participants === undefined);
+  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 2, named: 2 }, Date.now());
+  check('observation sink: roster-coverage reaches the aloneness tap',
+    activity.snapshot().participants === 2, JSON.stringify(activity.snapshot()));
+  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 0, named: 0 }, Date.now());
+  check('observation sink: an emptied roster reaches the aloneness tap',
+    activity.snapshot().participants === 0, JSON.stringify(activity.snapshot()));
 }
 
 // ── The real bundle (built by build-browser-utils.mjs — turbo test depends on build) ─────────────

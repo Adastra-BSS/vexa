@@ -307,3 +307,26 @@ def test_a_meeting_without_a_timeline_carries_none():
     })[-1]
     assert "speaker_events" not in final["data"]
     assert "recording_t0_ms" not in final["data"]
+
+
+@pytest.mark.parametrize("rule", ["empty-room", "silence"])
+def test_the_rule_that_left_the_bot_alone_is_persisted(rule):
+    """Both rules complete as left_alone; only this field says whether the room emptied or fell silent."""
+    terminal = {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "left_alone", "alone_rule": rule,
+    }
+    conforms(terminal, "LifecycleEvent")
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, terminal)[-1]
+    assert final["data"]["completion_reason"] == "left_alone"
+    assert final["data"]["alone_rule"] == rule
+
+
+def test_an_unknown_alone_rule_is_not_persisted():
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "left_alone", "alone_rule": "<script>",
+    })[-1]
+    assert "alone_rule" not in final["data"]

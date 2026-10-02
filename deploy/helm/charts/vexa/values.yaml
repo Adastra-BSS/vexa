@@ -251,6 +251,9 @@ runtime:
     idleTimeoutSec: ""
   # Active-phase remote-audio silence window. Empty uses the bot's 10-minute default.
   aloneSilenceWindowMs: ""
+  # How long the roster may show nobody but the bot before it leaves, whatever the silence window.
+  # Empty uses the bot's 90-second default; 0 disables the rule (silence alone decides).
+  emptyRoomWindowMs: ""
   # Requests/limits stamped onto every SPAWNED bot Pod (emitted as both requests AND limits).
   # Empty = no resources block, today's behaviour - but then a dedicated bot pool's cluster
   # autoscaler has nothing to scale on and every bot bin-packs onto one node. The memory limit

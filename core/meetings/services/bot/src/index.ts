@@ -38,7 +38,9 @@ import { uploadSignalTapes } from './signal-upload.js';
 import { createSttFaultReporter } from './stt-faults.js';
 import { createSpeakerTimeline } from './speaker-timeline.js';
 import { launchBrowser, startCaptureBridge, startRecording, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
-import { createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs } from './aloneness.js';
+import {
+  createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs, resolveEmptyRoomWindowMs,
+} from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
 import type {
   JoinDriver,
@@ -224,8 +226,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   const speakerStreamConfig = speakerStreamConfigFromEnv(env);
   const remoteAudioActivity = createRemoteAudioActivityTap();
   const aloneSilenceWindowMs = resolveAloneSilenceWindowMs(inv.automaticLeave?.everyoneLeftTimeout, env);
-  const aloneness = createSilenceAlonenessSource({ activity: remoteAudioActivity, windowMs: aloneSilenceWindowMs });
-  console.log(`[bot] aloneness: silence adapter enabled (window_ms=${aloneSilenceWindowMs})`);
+  const emptyRoomWindowMs = resolveEmptyRoomWindowMs(env);
+  const aloneness = createSilenceAlonenessSource({
+    activity: remoteAudioActivity, windowMs: aloneSilenceWindowMs, emptyRoomMs: emptyRoomWindowMs,
+  });
+  console.log(`[bot] aloneness: silence adapter enabled (window_ms=${aloneSilenceWindowMs}, empty_room_ms=${emptyRoomWindowMs})`);
   if (speakerStreamConfig) console.log(`[bot] speaker-stream tuning enabled: ${JSON.stringify(speakerStreamConfig)}`);
 
   try {
@@ -319,7 +324,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     degraded: () => {
       const faults = sttFaults.report();
       const timeline = speakerTimeline.snapshot();
-      return faults || timeline.speaker_events ? { ...(faults ?? {}), ...timeline } : undefined;
+      const aloneRule = aloneness.firedRule();
+      return faults || timeline.speaker_events || aloneRule
+        ? { ...(faults ?? {}), ...timeline, ...(aloneRule ? { alone_rule: aloneRule } : {}) }
+        : undefined;
     },
   });
 

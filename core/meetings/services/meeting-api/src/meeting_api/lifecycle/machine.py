@@ -27,6 +27,10 @@ _BOT_LOGS_BYTE_BUDGET = 50 * 1024
 # start of a meeting is kept, matching the bot, whose timeline stops growing once full.
 MAX_SPEAKER_EVENTS = 20_000
 
+# The bot's aloneness rules, which both complete a meeting as left_alone. Allow-listed because the
+# value is producer-supplied and lands verbatim in meeting.data.
+ALONE_RULES = frozenset({"empty-room", "silence"})
+
 
 class BotStatus(str, Enum):
     """lifecycle.v1 `BotStatus` — the bot's DOMAIN status (not the container's)."""
@@ -250,6 +254,8 @@ class MeetingRecord:
     stt_fault: Optional[Dict[str, Any]] = None
     speaker_events: Optional[List[Dict[str, Any]]] = None
     recording_t0_ms: Optional[int] = None
+    #: Why a left_alone bot decided it was alone: the room emptied, or it fell silent.
+    alone_rule: Optional[str] = None
     # User intent (parent's `meeting.data.stop_requested`) — set by the DELETE/stop path, read
     # first by the exit classifier so a user stop is never mis-attributed as a failure.
     stop_requested: bool = False
@@ -292,6 +298,8 @@ class MeetingRecord:
             d["speaker_events"] = list(self.speaker_events)
         if self.recording_t0_ms is not None:
             d["recording_t0_ms"] = self.recording_t0_ms
+        if self.alone_rule is not None:
+            d["alone_rule"] = self.alone_rule
         return d
 
 
@@ -522,6 +530,8 @@ class LifecycleSink:
                 rec.speaker_events = [dict(e) for e in event["speaker_events"][:MAX_SPEAKER_EVENTS] if isinstance(e, dict)]
             if isinstance(event.get("recording_t0_ms"), (int, float)):
                 rec.recording_t0_ms = int(event["recording_t0_ms"])
+            if event.get("alone_rule") in ALONE_RULES:
+                rec.alone_rule = event["alone_rule"]
 
         rec.status = to
         rec.history.append(to)

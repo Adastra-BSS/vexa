@@ -200,6 +200,9 @@ export function makeObservationSink(
   consumeRosterName?: (name: string, tMs: number) => void,
   /** …and the producer's account of how much of the roster it could read. */
   consumeRosterCoverage?: (named: number, participants: number, tMs: number) => void,
+  /** The aloneness tap, which needs the roster's participant count to tell an emptied room from a
+   *  quiet one. Fed on every lane, unlike the two consumers above. */
+  activity?: RemoteAudioActivityTap,
 ): { sink: (source: string, obs: unknown, tMs?: number) => void; crossed: () => number; stored: () => number } {
   let crossed = 0;
   let stored = 0;
@@ -230,6 +233,7 @@ export function makeObservationSink(
       if (payload.type === 'roster-coverage'
         && typeof payload.named === 'number' && typeof payload.participants === 'number') {
         try { consumeRosterCoverage?.(payload.named, payload.participants, t); } catch { /* never breaks capture */ }
+        try { activity?.observeParticipants(payload.participants); } catch { /* never breaks capture */ }
       }
     },
   };
@@ -759,6 +763,7 @@ export async function startCaptureBridge(
     lane, telemetry, undefined,
     mixed ? (name, tMs) => pipeline.recordRosterName?.(name, tMs) : undefined,
     mixed ? (named, participants, tMs) => pipeline.recordRosterCoverage?.(named, participants, tMs) : undefined,
+    activity,
   );
   // C1: the four hint hops on one periodic, cumulative counter line —
   // page-emitted lives in the page console ([TeamsSpeakers]/[JitsiSpeakers] logs);

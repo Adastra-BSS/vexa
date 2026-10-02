@@ -125,6 +125,7 @@ def default_registry() -> ProfileRegistry:
         key: os.environ[key]
         for key in (
             "BOT_ALONE_SILENCE_WINDOW_MS",
+            "BOT_EMPTY_ROOM_WINDOW_MS",
             "BOT_SPEAKER_MIN_AUDIO_SEC",
             "BOT_SPEAKER_SUBMIT_INTERVAL_SEC",
             "BOT_SPEAKER_CONFIRM_THRESHOLD",
