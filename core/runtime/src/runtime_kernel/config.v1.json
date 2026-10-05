@@ -134,8 +134,8 @@
   {
    "key": "BOT_EMPTY_ROOM_WINDOW_MS",
    "class": "defaulted",
-   "default": "90000",
-   "description": "how long the roster may report no other participants before completed(left_alone), regardless of the silence window; 0 disables; forwarded to spawned bots when set",
+   "default": "300000",
+   "description": "how long the roster may show nobody but bots, after someone had been in the meeting, before completed(left_alone), regardless of the silence window; 0 disables; forwarded to spawned bots when set",
    "targets": [
     "compose",
     "helm",

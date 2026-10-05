@@ -12,7 +12,7 @@
  * Run: npx tsx src/teams-name-hygiene.test.ts
  */
 import {
-  isGeneratedDefaultBotDisplayName, isTeamsDisplayNameCandidate, isSelfDisplayName,
+  isBotDisplayName, isGeneratedDefaultBotDisplayName, isTeamsDisplayNameCandidate, isSelfDisplayName,
   normalizeDisplayNameForIdentity,
 } from './msteams-speakers.js';
 
@@ -86,6 +86,20 @@ for (const real of [
 ]) {
   check(`human: "${real}" is still a name`, isTeamsDisplayNameCandidate(real), real);
 }
+
+// ── other notetaker bots, by the words in their display name ─────────────────────────────────────
+for (const bot of [
+  'Adastra AI Notetaker (Unverified)', 'Adastra AI Notetaker [Jan Cech] (Unverified)',
+  'Fireflies.ai Notetaker', 'Otter.ai', 'Read.ai meeting notes', 'tl;dv Recorder',
+  'TranscriptBot (Unverified)', 'Meeting Bot', 'Fathom', 'Copilot', 'Attend Notetaker',
+]) {
+  check(`bot: "${bot}" is recognised as a notetaker bot`, isBotDisplayName(bot), bot);
+}
+for (const human of ['Jan Talbot', 'Sana Rahman', 'Ottery Smith', 'Robin Botman', 'Dmitry Grankin', 'Abbott Lee']) {
+  check(`bot: "${human}" is a person, not a bot`, !isBotDisplayName(human), human);
+}
+check('bot: a custom keyword list replaces the default one',
+  isBotDisplayName('Zylo Helper', ['zylo']) && !isBotDisplayName('Adastra AI Notetaker', ['zylo']));
 
 if (failed) { console.error(`\n❌ teams-name-hygiene: ${failed} check(s) FAILED.`); process.exit(1); }
 console.log('\n✅ teams-name-hygiene: our own bot and the platform\'s placeholders can never become speakers, and real names are untouched.');

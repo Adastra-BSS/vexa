@@ -233,7 +233,10 @@ export function makeObservationSink(
       if (payload.type === 'roster-coverage'
         && typeof payload.named === 'number' && typeof payload.participants === 'number') {
         try { consumeRosterCoverage?.(payload.named, payload.participants, t); } catch { /* never breaks capture */ }
-        try { activity?.observeParticipants(payload.participants); } catch { /* never breaks capture */ }
+        const bots = typeof payload.bots === 'number' ? payload.bots : 0;
+        try {
+          activity?.observeRoster({ participants: payload.participants, named: payload.named, bots });
+        } catch { /* never breaks capture */ }
       }
     },
   };

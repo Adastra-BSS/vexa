@@ -91,14 +91,22 @@ const check = (name: string, cond: boolean, detail?: string) => {
   // tap on every lane, independently of whether the lane's transcriber wants it.
   const activity = createRemoteAudioActivityTap();
   const sink = makeObservationSink('mixed', undefined, () => {}, undefined, undefined, activity);
-  check('observation sink: no roster report leaves the participant count unknown',
-    activity.snapshot().participants === undefined);
-  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 2, named: 2 }, Date.now());
+  check('observation sink: no roster report leaves the room state unknown',
+    activity.snapshot().roomEmpty === undefined);
+  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 2, named: 2, bots: 1 }, Date.now());
   check('observation sink: roster-coverage reaches the aloneness tap',
-    activity.snapshot().participants === 2, JSON.stringify(activity.snapshot()));
-  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 0, named: 0 }, Date.now());
-  check('observation sink: an emptied roster reaches the aloneness tap',
-    activity.snapshot().participants === 0, JSON.stringify(activity.snapshot()));
+    activity.snapshot().roomEmpty === false, JSON.stringify(activity.snapshot()));
+  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 1, named: 1, bots: 1 }, Date.now());
+  check('observation sink: a room of bots reaches the aloneness tap as empty',
+    activity.snapshot().roomEmpty === true, JSON.stringify(activity.snapshot()));
+}
+{
+  // A report without the bot count (a page bundle from before it existed) counts nobody as a bot.
+  const activity = createRemoteAudioActivityTap();
+  const sink = makeObservationSink('mixed', undefined, () => {}, undefined, undefined, activity);
+  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 1, named: 1 }, Date.now());
+  check('observation sink: a report without a bot count treats every named participant as a person',
+    activity.snapshot().roomEmpty === false, JSON.stringify(activity.snapshot()));
 }
 
 // ── The real bundle (built by build-browser-utils.mjs — turbo test depends on build) ─────────────

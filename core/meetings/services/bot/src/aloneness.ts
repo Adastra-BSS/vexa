@@ -3,7 +3,7 @@ import type { AlonenessSource } from './ports.js';
 
 export const DEFAULT_ALONE_SILENCE_WINDOW_MS = 10 * 60 * 1000;
 /** Long enough to sit out someone dropping and rejoining, short against the silence window. */
-export const DEFAULT_EMPTY_ROOM_WINDOW_MS = 90 * 1000;
+export const DEFAULT_EMPTY_ROOM_WINDOW_MS = 5 * 60 * 1000;
 export const DEFAULT_ALONENESS_POLL_MS = 1_500;
 /** Presence floor for a DELIVERED remote frame — deliberately 0 (arrival is the signal).
  *
@@ -25,10 +25,31 @@ export const REMOTE_AUDIO_ENERGY_FLOOR = 0;
 export interface RemoteAudioActivitySnapshot {
   available: boolean;
   lastRemoteAudioAt?: number;
-  /** Other people in the room as the page's roster last reported them; undefined until a report. */
-  participants?: number;
-  /** When `participants` last changed, so an empty room can be timed from the moment it emptied. */
-  participantsSince?: number;
+  /** Whether the page's roster last showed nobody but bots; undefined until a report. */
+  roomEmpty?: boolean;
+  /** When the room last became empty, so it can be timed from the moment it emptied. */
+  roomEmptySince?: number;
+  /** Somebody has been in the room at some point. Until then the meeting may just be starting late. */
+  roomEverOccupied?: boolean;
+}
+
+/** One roster report from the page. All counts exclude the bot itself. */
+export interface RosterReport {
+  /** Participant surfaces, counting each unnamed one separately. */
+  participants: number;
+  /** …of which a display name resolved. */
+  named: number;
+  /** …of which the name reads as another meeting bot. */
+  bots: number;
+}
+
+/** Nobody left but bots. Alone, Teams renders the bot's own avatar without a name label, which the
+ *  scan cannot tell from a person and counts as one unnamed participant; so one unnamed surface with
+ *  no named human beside it is still an empty room, and a second unnamed one is somebody. */
+export function isEmptyRoom(report: RosterReport): boolean {
+  const namedHumans = report.named - report.bots;
+  const unnamed = report.participants - report.named;
+  return namedHumans <= 0 && unnamed <= 1;
 }
 
 export interface RemoteAudioActivitySource {
@@ -42,8 +63,8 @@ export interface RemoteAudioActivityTap extends RemoteAudioActivitySource {
   observeRemoteEnergy(energy: number): void;
   /** Capture stopped or failed; aloneness must fail closed until it is ready again. */
   unavailable(): void;
-  /** Record the page's count of participants other than the bot. */
-  observeParticipants(count: number): void;
+  /** Record the page's latest roster report. */
+  observeRoster(report: RosterReport): void;
 }
 
 export type AlonenessVerdict = 'alone' | 'not-alone' | 'unavailable';
@@ -70,7 +91,7 @@ export function createRemoteAudioActivityTap(options: {
   let state: { available: boolean; lastRemoteAudioAt?: number } = { available: false };
   // Kept apart from the audio state: the roster comes from the page's participant scan, not from
   // audio capture, so capture readiness changing must not forget who is in the room.
-  let roster: { participants?: number; participantsSince?: number } = {};
+  let roster: { roomEmpty?: boolean; roomEmptySince?: number; roomEverOccupied?: boolean } = {};
 
   return {
     ready(): void {
@@ -84,9 +105,13 @@ export function createRemoteAudioActivityTap(options: {
     unavailable(): void {
       state = { available: false };
     },
-    observeParticipants(count: number): void {
-      if (!Number.isFinite(count) || count < 0 || count === roster.participants) return;
-      roster = { participants: count, participantsSince: now() };
+    observeRoster(report: RosterReport): void {
+      const counts = [report.participants, report.named, report.bots];
+      if (!counts.every((n) => Number.isFinite(n) && n >= 0)) return;
+      const empty = isEmptyRoom(report);
+      if (!empty) { roster = { roomEmpty: false, roomEverOccupied: true }; return; }
+      if (roster.roomEmpty) return;
+      roster = { roomEmpty: true, roomEmptySince: now(), roomEverOccupied: roster.roomEverOccupied ?? false };
     },
     snapshot(): RemoteAudioActivitySnapshot {
       return { ...state, ...roster };
@@ -94,13 +119,14 @@ export function createRemoteAudioActivityTap(options: {
   };
 }
 
-/** An empty roster for the window means everyone left. No roster report at all means the platform
- *  or page cannot count, which is not evidence of an empty room. */
+/** A room empty for the window, after somebody had been in it, means everyone left. No roster
+ *  report at all means the platform or page cannot count, which is not evidence of an empty room. */
 function emptyRoomFor(snapshot: RemoteAudioActivitySnapshot, now: number, emptyRoomMs: number): boolean {
   return emptyRoomMs > 0
-    && snapshot.participants === 0
-    && snapshot.participantsSince !== undefined
-    && now - snapshot.participantsSince >= emptyRoomMs;
+    && snapshot.roomEverOccupied === true
+    && snapshot.roomEmpty === true
+    && snapshot.roomEmptySince !== undefined
+    && now - snapshot.roomEmptySince >= emptyRoomMs;
 }
 
 export const silenceAlonenessAdapter: AlonenessAdapter = {
@@ -138,7 +164,7 @@ export function resolveEmptyRoomWindowMs(
   if (raw !== undefined && raw.trim() !== '') {
     const value = Number(raw);
     if (Number.isFinite(value) && value >= 0) return value;
-    warn(`BOT_EMPTY_ROOM_WINDOW_MS=${JSON.stringify(raw)} is invalid; using the 90-second default`);
+    warn(`BOT_EMPTY_ROOM_WINDOW_MS=${JSON.stringify(raw)} is invalid; using the 5-minute default`);
   }
   return DEFAULT_EMPTY_ROOM_WINDOW_MS;
 }
@@ -190,7 +216,7 @@ export function createSilenceAlonenessSource(options: {
         // Either rule ends the meeting on its own: the silence window is for a room that still has
         // people in it, so an emptied room must not have to sit it out.
         if (emptyRoomFor(snapshot, at, emptyRoomMs)) {
-          verdict('empty-room', `participants_since=${snapshot.participantsSince}, empty_room_ms=${emptyRoomMs}`);
+          verdict('empty-room', `room_empty_since=${snapshot.roomEmptySince}, empty_room_ms=${emptyRoomMs}`);
           return;
         }
         for (const adapter of adapters) {
