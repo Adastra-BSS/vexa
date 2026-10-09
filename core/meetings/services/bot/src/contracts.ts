@@ -50,6 +50,9 @@ export interface LifecycleEvent {
   bot_logs?: string[];
   bot_resources?: { peak_memory_bytes?: number; cpu_usage_usec?: number; [k: string]: unknown };
   speaker_events?: unknown[];
+  /** Which aloneness rule ended a left_alone meeting: the room emptied, or it fell silent.
+   *  Additive, same liberal-ingestion rationale as `infra_fault` below. */
+  alone_rule?: 'empty-room' | 'silence';
   /** Machine-readable infra-fault tag on a pre-join control-plane-unreachable abort (#530).
    *  Additive field: lifecycle.v1 ingests liberally (additionalProperties:true), so this rides
    *  the SEALED contract WITHOUT a schema/seal bump — it carries the attribution the sealed

@@ -78,6 +78,7 @@ class FakeEl {
   get children(): FakeEl[] { return this.kids; }
   get textContent(): string { let s = this.ownText; for (const k of this.kids) s += k.textContent; return s; }
   getAttribute(n: string): string | null { return n in this.attrs ? this.attrs[n] : null; }
+  getAttributeNames(): string[] { return Object.keys(this.attrs); }
   setAttribute(n: string, v: string): void { this.attrs[n] = v; }
   get classList() {
     const s = new Set((this.attrs['class'] || '').split(/\s+/).filter(Boolean));
@@ -645,6 +646,47 @@ const ofType = (observations: TeamsProducerObservation[], type: string): TeamsPr
     rosterNames.every((o) => o.name !== 'VexaBot-8f264c (Unverified)'), JSON.stringify(rosterNames));
   check('m26218 generated bot: unresolved four-surface scan reports 0/4 and cannot eliminate',
     last?.named === 0 && last?.participants === 4, JSON.stringify(rosterCoverage));
+  h.watcher.destroy();
+}
+{
+  // Prod 2026-10: another notetaker sits in a third of meetings and leaves five minutes after the
+  // last person. Coverage says how many of the named participants are bots, so the room can be
+  // judged empty while one is still there.
+  const tiles = [
+    makeTile('self', 'Attend Notetaker (Unverified)', { outline: true }).tile,
+    makeTile('p1', 'Adastra AI Notetaker (Unverified)', { outline: true }).tile,
+    makeTile('p2', 'Dmitry Grankin', { outline: true }).tile,
+  ];
+  const h = start(tiles, { selfName: 'Attend Notetaker' });
+  await settle();
+  const last = (ofType(h.observations, 'roster-coverage') as any[]).at(-1);
+  check('bots: another notetaker is named and counted as a bot, our own tile as neither',
+    last?.named === 2 && last?.participants === 2 && last?.bots === 1, JSON.stringify(last));
+  h.watcher.destroy();
+}
+{
+  const tiles = [makeTile('p1', 'Zylo Helper', { outline: true }).tile];
+  const h = start(tiles, { selfName: 'Attend Notetaker', botNameKeywords: ['zylo'] });
+  await settle();
+  const last = (ofType(h.observations, 'roster-coverage') as any[]).at(-1);
+  check('bots: the keyword list is configurable', last?.bots === 1, JSON.stringify(last));
+  h.watcher.destroy();
+}
+{
+  // Meeting 18/19 on dev: alone, Teams shows the bot's own avatar without a name label and the scan
+  // counts it as one unnamed participant. What it matched must be visible in the log, without any
+  // attribute value or text that could carry a display name.
+  const avatar = new FakeEl('div', { 'data-tid': 'participant-avatar-Secret Name', class: 'x1' }, [
+    new FakeEl('img', { alt: '' }),
+  ]);
+  const h = start([avatar], { selfName: 'Attend Notetaker' });
+  await settle();
+  const line = h.logs.find((l) => l.includes('roster-unresolved'));
+  check('unresolved surface: its matched selector and shape are logged',
+    !!line && line.includes('[data-tid*="participant"]') && line.includes('<div') && line.includes('data-tid'),
+    JSON.stringify(h.logs));
+  check('unresolved surface: no attribute value or text reaches the log',
+    !!line && !line.includes('Secret') && !line.includes('x1'), String(line));
   h.watcher.destroy();
 }
 {

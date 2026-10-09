@@ -42,6 +42,7 @@ import type { BotPipeline } from './pipeline.js';
 import type { BotRecordingSink } from './recording.js';
 import type { TelemetrySink } from './ports.js';
 import type { RemoteAudioActivityTap } from './aloneness.js';
+import type { SpeakerTimeline } from './speaker-timeline.js';
 import { createTtsPlayback } from './tts-playback.js';
 import { wantsVideoCapture } from './video-recording.js';
 
@@ -200,6 +201,9 @@ export function makeObservationSink(
   consumeRosterName?: (name: string, tMs: number) => void,
   /** …and the producer's account of how much of the roster it could read. */
   consumeRosterCoverage?: (named: number, participants: number, tMs: number) => void,
+  /** The aloneness tap, which needs the roster's participant count to tell an emptied room from a
+   *  quiet one. Fed on every lane, unlike the two consumers above. */
+  activity?: RemoteAudioActivityTap,
 ): { sink: (source: string, obs: unknown, tMs?: number) => void; crossed: () => number; stored: () => number } {
   let crossed = 0;
   let stored = 0;
@@ -230,6 +234,10 @@ export function makeObservationSink(
       if (payload.type === 'roster-coverage'
         && typeof payload.named === 'number' && typeof payload.participants === 'number') {
         try { consumeRosterCoverage?.(payload.named, payload.participants, t); } catch { /* never breaks capture */ }
+        const bots = typeof payload.bots === 'number' ? payload.bots : 0;
+        try {
+          activity?.observeRoster({ participants: payload.participants, named: payload.named, bots });
+        } catch { /* never breaks capture */ }
       }
     },
   };
@@ -698,6 +706,8 @@ export async function startCaptureBridge(
   onChat?: (sender: string, text: string) => void,
   /** Active-phase silence signal. It remains unavailable until page capture reports ready. */
   activity?: RemoteAudioActivityTap,
+  /** Who-spoke-when, kept for the post-call transcription that names diarized voices from it. */
+  timeline?: SpeakerTimeline,
 ): Promise<() => Promise<void>> {
   const mixed = isMixedLanePlatform(inv.platform);
   const jitsi = inv.platform === 'jitsi';
@@ -733,7 +743,11 @@ export async function startCaptureBridge(
   };
   // mixed lane "who is lit" hint (Zoom/Teams active-speaker → the namer's time window).
   // Epoch-clock-guarded + counted; see makeSpeakerHintSink for the clock contract.
-  const { sink: onSpeakerHint, crossed: hintsBridgeCrossed } = makeSpeakerHintSink(pipeline, undefined, telemetry);
+  // Teed to the timeline AFTER the clock guard, so it stores the same epoch time the lane saw.
+  const hintTarget: Pick<BotPipeline, 'recordHint'> = timeline
+    ? { recordHint: (name, tMs, isEnd) => { timeline.record(name, tMs, isEnd); pipeline.recordHint(name, tMs, isEnd); } }
+    : pipeline;
+  const { sink: onSpeakerHint, crossed: hintsBridgeCrossed } = makeSpeakerHintSink(hintTarget, undefined, telemetry);
   // Teams live captions: Teams' own ASR names the speaker, which is a second, independent naming
   // source beside the voice-level outline. The AUTHOR (never the text) is now offered to the lane
   // as evidence for a transport TRACK — still not to pipeline.recordHint, because a caption is not
@@ -756,6 +770,7 @@ export async function startCaptureBridge(
     lane, telemetry, undefined,
     mixed ? (name, tMs) => pipeline.recordRosterName?.(name, tMs) : undefined,
     mixed ? (named, participants, tMs) => pipeline.recordRosterCoverage?.(named, participants, tMs) : undefined,
+    activity,
   );
   // C1: the four hint hops on one periodic, cumulative counter line —
   // page-emitted lives in the page console ([TeamsSpeakers]/[JitsiSpeakers] logs);
@@ -1259,7 +1274,14 @@ export function startVideoDiagnostics(page: Page, log: (m: string) => void = (m)
  * stop) is the COMPLETED signal. Started post-admission (on the live meeting page, where the
  * participant <audio> elements exist), exactly like the capture bridge.
  */
-export async function startRecording(page: Page, inv: Invocation, recording: BotRecordingSink): Promise<() => Promise<void>> {
+export async function startRecording(
+  page: Page,
+  inv: Invocation,
+  recording: BotRecordingSink,
+  /** Epoch ms of the recording's t=0 (MediaRecorder.onstart), the origin the speaker timeline is
+   *  expressed in. The server's first-chunk time runs a timeslice plus upload late (~17 s live). */
+  onStarted?: (tMs: number) => void,
+): Promise<() => Promise<void>> {
   const key = `${inv.platform}/${inv.nativeMeetingId ?? inv.connectionId ?? 'session'}`;
   // Recording part interval (ms): the MediaRecorder timeslice = the durable-upload granularity.
   // Env-overridable (VEXA_RECORDING_TIMESLICE_MS) so a live multi-part run can shrink it to land
@@ -1277,6 +1299,9 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
     const format: RecordingMasterFormat = /wav/i.test(mimeType) ? 'wav' : 'webm';
     recording.chunk(key, chunkSeq, isFinal, format, bytes);
   }).catch((e: Error) => { if (!String(e.message).includes('already registered')) throw e; });
+  await page.exposeFunction('__vexaRecordingStarted', (tMs: number): void => {
+    try { onStarted?.(tMs); } catch { /* alignment metadata must never stop the recording */ }
+  }).catch((e: Error) => { if (!String(e.message).includes('already registered')) throw e; });
 
   // Page-side: start the generic recording tap (finds + combines the page audio elements).
   await page.evaluate(async (timesliceMs) => {
@@ -1284,6 +1309,8 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
     if (w.VexaBrowserUtils?.createRecordingTap && !w.__vexaRecordingTap) {
       w.__vexaRecordingTap = w.VexaBrowserUtils.createRecordingTap({
         timesliceMs,
+        // Stamped page-side with the same Date.now() the speaker hints carry, so both share one clock.
+        onStarted: () => { void w.__vexaRecordingStarted?.(Date.now()); },
         onChunk: async (c: { base64: string; chunkSeq: number; isFinal: boolean; mimeType: string }) => {
           try { await w.__vexaRecordingChunk(c.base64, c.chunkSeq, c.isFinal, c.mimeType); return true; }
           catch { return false; }

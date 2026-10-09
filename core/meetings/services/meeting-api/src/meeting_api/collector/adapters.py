@@ -25,7 +25,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Optional
 
-from .ports import RedisBus, TranscriptStore
+from .ports import ARTIFACT_DATA_KEYS, RedisBus, TranscriptStore
 
 log = logging.getLogger("meeting_api.collector.adapters")
 
@@ -1248,7 +1248,7 @@ class SqlAlchemyTranscriptStore:
                 return False
             await db.execute(delete(Transcription).where(Transcription.meeting_id == meeting_id))
             data = dict(meeting.data) if isinstance(meeting.data, dict) else {}
-            for key in ("recordings", "processed", "notes", "share_grants", "transcript_viewers"):
+            for key in ARTIFACT_DATA_KEYS:
                 data.pop(key, None)
             data["artifact_deletion"] = {
                 "state": "completed",

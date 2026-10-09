@@ -226,6 +226,45 @@ export function isGeneratedDefaultBotDisplayName(value: string): boolean {
   return /^vexabot-[0-9a-f]{6}$/iu.test(normalizeDisplayNameForIdentity(value));
 }
 
+/** Words other meeting bots put in their display names. Used only to decide whether anyone but bots
+ *  is left in the room, never to name or drop a speaker: a person matched here by mistake costs the
+ *  meeting an earlier leave once everyone else has gone, nothing more. Product names stay qualified
+ *  ("otter.ai", not "otter") because the bare word is also a surname. */
+export const DEFAULT_BOT_NAME_KEYWORDS: readonly string[] = [
+  'notetaker', 'note taker', 'recorder', 'assistant', 'copilot', 'bot',
+  'fireflies.ai', 'otter.ai', 'read.ai', 'tl;dv', 'fathom',
+];
+
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+const LOWER = /\p{Ll}/u;
+const UPPER = /\p{Lu}/u;
+
+/** A word edge sits between a word character and anything else, or inside camelCase
+ *  ("Transcript|Bot"), so "TranscriptBot" carries "bot" and "Talbot" does not. */
+function isWordEdge(text: string, at: number): boolean {
+  const before = text[at - 1];
+  const after = text[at];
+  if (before === undefined || after === undefined) return true;
+  if (!WORD_CHAR.test(before) || !WORD_CHAR.test(after)) return true;
+  return LOWER.test(before) && UPPER.test(after);
+}
+
+/** Does this display name read as another meeting bot? Case-insensitive whole-word match. */
+export function isBotDisplayName(name: string, keywords: readonly string[] = DEFAULT_BOT_NAME_KEYWORDS): boolean {
+  const text = String(name || '');
+  const lower = text.toLowerCase();
+  // Lowercasing can change length for a few scripts; edges are then judged on the lowered text.
+  const edges = lower.length === text.length ? text : lower;
+  for (const raw of keywords) {
+    const keyword = raw.trim().toLowerCase();
+    if (!keyword) continue;
+    for (let at = lower.indexOf(keyword); at !== -1; at = lower.indexOf(keyword, at + 1)) {
+      if (isWordEdge(edges, at) && isWordEdge(edges, at + keyword.length)) return true;
+    }
+  }
+  return false;
+}
+
 /** Is `name` the local participant (our bot), whatever qualifier Teams hung off it? */
 export function isSelfDisplayName(name: string, selfName: string | undefined): boolean {
   const self = normalizeDisplayNameForIdentity(selfName || '');
@@ -602,6 +641,8 @@ export interface TeamsRosterCoverageObservation {
   participants: number;
   /** …of which a display name resolved. */
   named: number;
+  /** …of which the name reads as another meeting bot (`isBotDisplayName`). */
+  bots: number;
   tMs: number;
 }
 
@@ -662,6 +703,9 @@ export interface TeamsSpeakerHealth {
 export interface TeamsSpeakersOptions {
   /** Local participant / bot display name — its tiles are never reported. */
   selfName?: string;
+  /** Words that mark another participant as a meeting bot in roster coverage.
+   *  Default `DEFAULT_BOT_NAME_KEYWORDS`. */
+  botNameKeywords?: readonly string[];
   /** Debounced speaking state change: isEnd=false → started speaking,
    *  isEnd=true → stopped. tMs = wall-clock at emit. */
   onSpeaking: (name: string, id: string, isEnd: boolean, tMs: number) => void;
@@ -709,6 +753,7 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
   const indicatorSilentMs = opts.indicatorSilentMs ?? 60_000;
   const indicatorHoldMs = opts.indicatorHoldMs ?? 400;
   const rosterEmitScans = opts.rosterEmitScans ?? 3;
+  const botNameKeywords = opts.botNameKeywords ?? DEFAULT_BOT_NAME_KEYWORDS;
   const now = opts.now ?? (() => Date.now());
 
   // ── Coverage accounting (Gate A) ──
@@ -810,6 +855,19 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
       : element.querySelector(STREAM_WRAPPER_SELECTOR) ? 'descendant' : 'absent';
     const stableRoot = matchesSelector(element, STABLE_PARTICIPANT_ROOT_SELECTOR) ? 'yes' : 'no';
     return `stream=${stream} stable-root=${stableRoot}`;
+  }
+
+  /** What an unnamed surface IS, for the log: the selector that caught it, its tag, role and
+   *  attribute NAMES. Values and text are left out because Teams puts display names in them. */
+  function unresolvedSurfaceShape(selector: string, element: HTMLElement): string {
+    try {
+      const names = typeof element.getAttributeNames === 'function' ? element.getAttributeNames() : [];
+      const role = element.getAttribute('role');
+      return `selector=${selector} <${String(element.tagName || '?').toLowerCase()}${role ? ` role=${role}` : ''}> `
+        + `attrs=[${names.join(',')}] children=${element.children?.length ?? '?'} ${participantSurfaceShape(element)}`;
+    } catch {
+      return `selector=${selector} <unreadable>`;   // a diagnostic must never break the scan
+    }
   }
 
   // ── State machine (200ms hysteresis, signal-required) ──
@@ -1285,6 +1343,7 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
     scanCounter++;
     const namesThisScan = new Set<string>();
     let unresolvedParticipantSurfaces = 0;
+    const unresolvedShapes: string[] = [];
     // SECOND SURFACE: the roster panel, if the meeting has it open. Read FIRST and merged into the
     // same stream — a name is a name whichever surface showed it — but counted separately, because
     // "the tiles are gone and the panel saved us" is exactly the state worth being able to see in a
@@ -1315,7 +1374,7 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
           else {
             const rosterName = extractTeamsSpeakerName(surface, { nameContext });
             if (rosterName) namesThisScan.add(rosterName);
-            else unresolvedParticipantSurfaces++;
+            else { unresolvedParticipantSurfaces++; unresolvedShapes.push(unresolvedSurfaceShape(selector, surface)); }
           }
           if (hasRequiredSignal(surface)) { observable++; observeParticipant(surface); }
           else emitSignalAbsent(surface);   // counted and reported, never hinted
@@ -1343,11 +1402,13 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
     const unresolvedPanelParticipants = Math.max(
       0, nonSelfPanelEntries.length - distinctUsablePanelNames.size);
     const participants = usableNames.size + unresolvedParticipantSurfaces + unresolvedPanelParticipants;
-    const coverageKey = `${usableNames.size}/${participants}`;
+    const bots = [...usableNames].filter((n) => isBotDisplayName(n, botNameKeywords)).length;
+    const coverageKey = `${usableNames.size}/${participants}/${bots}`;
     if (coverageKey !== lastCoverageKey) {
       lastCoverageKey = coverageKey;
-      deliver({ type: 'roster-coverage', platform: 'teams', participants, named: usableNames.size, tMs: now() });
-      log(`[TeamsSpeakers] roster-coverage named=${usableNames.size} participants=${participants}`);
+      deliver({ type: 'roster-coverage', platform: 'teams', participants, named: usableNames.size, bots, tMs: now() });
+      log(`[TeamsSpeakers] roster-coverage named=${usableNames.size} participants=${participants} bots=${bots}`);
+      for (const shape of unresolvedShapes) log(`[TeamsSpeakers] roster-unresolved ${shape}`);
     }
     coverage.found = found;
     coverage.observable = observable;

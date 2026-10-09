@@ -1,9 +1,11 @@
 /** Deterministic proof for silence-based active-phase aloneness. */
 import {
   DEFAULT_ALONE_SILENCE_WINDOW_MS,
+  DEFAULT_EMPTY_ROOM_WINDOW_MS,
   createRemoteAudioActivityTap,
   createSilenceAlonenessSource,
   resolveAloneSilenceWindowMs,
+  resolveEmptyRoomWindowMs,
 } from './aloneness.js';
 
 let failed = 0;
@@ -34,13 +36,14 @@ class FakeScheduler {
 const loudEnergy = 0.02;
 const quietEnergy = 0.001;
 
-function fixture(windowMs = 1_000) {
+function fixture(windowMs = 1_000, emptyRoomMs = 0) {
   const clock = new FakeClock();
   const scheduler = new FakeScheduler();
   const activity = createRemoteAudioActivityTap({ now: clock.now });
   const source = createSilenceAlonenessSource({
     activity,
     windowMs,
+    emptyRoomMs,
     now: clock.now,
     pollMs: 10,
     setInterval: scheduler.setInterval,
@@ -184,6 +187,182 @@ function fixture(windowMs = 1_000) {
   check('a future adapter can veto the silence verdict', fired === 0);
 }
 
+// Room states as the Teams scan reports them (participants and names exclude the bot itself).
+const people = (n: number) => ({ participants: n, named: n, bots: 0 });
+const nobody = { participants: 0, named: 0, bots: 0 };
+// Alone, Teams shows the bot's own avatar without a name label; the scan counts it as one unnamed.
+const soloAvatar = { participants: 1, named: 0, bots: 0 };
+const onlyBots = (n: number) => ({ participants: n, named: n, bots: n });
+
+// Everyone left: an empty room ends the meeting after the empty-room window, long before the
+// silence window would.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(2));
+  f.clock.advance(1_000);
+  f.activity.observeRoster(nobody);
+  f.clock.advance(299); f.scheduler.tick();
+  check('an empty room before the empty-room window does not fire', fired === 0);
+  f.clock.advance(1); f.scheduler.tick();
+  check('an empty room at the empty-room window fires', fired === 1);
+}
+
+// Meetings 18/19 on dev: the bot's own nameless avatar is what an empty Teams room looks like.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster(soloAvatar);
+  f.clock.advance(300); f.scheduler.tick();
+  check('one unnamed surface and nobody named is an empty room', fired === 1);
+}
+
+// Prod: another notetaker stays five minutes after the people; a room of bots is an empty room.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster({ participants: 2, named: 2, bots: 1 });
+  f.clock.advance(1_000); f.scheduler.tick();
+  check('a person beside another bot keeps the room occupied', fired === 0);
+  f.activity.observeRoster(onlyBots(1));
+  f.clock.advance(300); f.scheduler.tick();
+  check('only other bots left is an empty room', fired === 1);
+}
+
+// One named person alone with the bot is a person: the silence window decides, not the empty room.
+{
+  const f = fixture(1_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(1));
+  f.clock.advance(999); f.scheduler.tick();
+  check('a lone named person keeps a silent room open until the silence window', fired === 0);
+  f.clock.advance(1); f.scheduler.tick();
+  check('a lone named person who stays silent is left at the silence window', fired === 1);
+  check('that leave is reported as the silence rule', f.source.firedRule() === 'silence');
+}
+
+// Two unnamed surfaces are more than the bot's own avatar: someone is there.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster({ participants: 2, named: 0, bots: 0 });
+  f.clock.advance(1_000); f.scheduler.tick();
+  check('two unnamed surfaces keep the room occupied', fired === 0);
+}
+
+// Before anyone has joined, the bot is alone too, but the meeting may simply start late: the empty
+// room only counts once somebody has been in it.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(soloAvatar);
+  f.clock.advance(5_000); f.scheduler.tick();
+  check('an empty room nobody has joined yet does not trigger the empty-room rule', fired === 0);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster(soloAvatar);
+  f.clock.advance(300); f.scheduler.tick();
+  check('once someone has come and gone, the empty-room rule applies', fired === 1);
+}
+
+// Someone rejoining inside the empty-room window resets it: a dropped connection is not a leave.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster(nobody);
+  f.clock.advance(200);
+  f.activity.observeRoster(people(1));
+  f.clock.advance(200);
+  f.activity.observeRoster(soloAvatar);
+  f.clock.advance(299); f.scheduler.tick();
+  check('a rejoin resets the empty-room window', fired === 0);
+  f.clock.advance(1); f.scheduler.tick();
+  check('the reset empty-room window eventually fires', fired === 1);
+}
+
+// Two empty readings in a row (nobody, then the avatar appearing) are one empty spell, not a reset.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster(nobody);
+  f.clock.advance(200);
+  f.activity.observeRoster(soloAvatar);
+  f.clock.advance(100); f.scheduler.tick();
+  check('the empty-room window runs from the first empty reading', fired === 1);
+}
+
+// A silent room with people in it sits out the full silence window, not the empty-room one.
+{
+  const f = fixture(1_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(3));
+  f.clock.advance(999); f.scheduler.tick();
+  check('people present keep a silent room open until the silence window', fired === 0);
+  f.clock.advance(1); f.scheduler.tick();
+  check('people present but silent still leave at the silence window', fired === 1);
+}
+
+// A page that never reports a roster cannot count, which is not an empty room: silence alone decides.
+{
+  const f = fixture(1_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRemoteEnergy(loudEnergy);
+  f.clock.advance(999); f.scheduler.tick();
+  check('no roster report never triggers the empty-room rule', fired === 0);
+  f.clock.advance(1); f.scheduler.tick();
+  check('no roster report falls back to the silence window', fired === 1);
+}
+
+// The roster comes from the participant scan, not audio capture: capture becoming ready must not
+// forget an empty room, and the empty-room rule does not wait on capture at all.
+{
+  const f = fixture(10_000, 300);
+  let fired = 0;
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster(nobody);
+  f.clock.advance(150);
+  f.activity.ready();
+  f.clock.advance(150); f.scheduler.tick();
+  check('capture readiness does not reset the empty-room window', fired === 1);
+}
+
+// The rule is off at 0, so a deployment can opt back into silence-only.
+{
+  const f = fixture(1_000, 0);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRemoteEnergy(loudEnergy);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster(nobody);
+  f.clock.advance(999); f.scheduler.tick();
+  check('a zero empty-room window disables the rule', fired === 0);
+}
+
 // Timeout precedence: explicit invocation > valid env > 10-minute module default.
 {
   check('explicit everyoneLeftTimeout wins',
@@ -197,7 +376,40 @@ function fixture(windowMs = 1_000) {
     resolveAloneSilenceWindowMs(undefined, { BOT_ALONE_SILENCE_WINDOW_MS: 'nope' }, () => {}) === 600_000);
 }
 
+// Which rule ended the meeting is reported, because both end it as the same left_alone.
+{
+  const empty = fixture(10_000, 300);
+  empty.activity.ready();
+  empty.source.onAlone(() => {});
+  check('no rule is reported before a verdict', empty.source.firedRule() === undefined);
+  empty.activity.observeRoster(people(1));
+  empty.activity.observeRoster(nobody);
+  empty.clock.advance(300); empty.scheduler.tick();
+  check('an empty-room verdict reports the empty-room rule', empty.source.firedRule() === 'empty-room');
+
+  const silent = fixture(1_000, 300);
+  silent.activity.ready();
+  silent.source.onAlone(() => {});
+  silent.activity.observeRoster(people(2));
+  silent.clock.advance(1_000); silent.scheduler.tick();
+  check('a silence verdict reports the silence rule', silent.source.firedRule() === 'silence');
+}
+
+// Empty-room window: valid env > 5-minute module default; an explicit 0 turns the rule off.
+{
+  check('empty-room env override applies',
+    resolveEmptyRoomWindowMs({ BOT_EMPTY_ROOM_WINDOW_MS: '45000' }) === 45_000);
+  check('empty-room module default is 5 minutes',
+    resolveEmptyRoomWindowMs({}) === DEFAULT_EMPTY_ROOM_WINDOW_MS && DEFAULT_EMPTY_ROOM_WINDOW_MS === 300_000);
+  check('an explicit 0 disables the empty-room rule',
+    resolveEmptyRoomWindowMs({ BOT_EMPTY_ROOM_WINDOW_MS: '0' }) === 0);
+  const warnings: string[] = [];
+  check('invalid empty-room env falls back to the module default',
+    resolveEmptyRoomWindowMs({ BOT_EMPTY_ROOM_WINDOW_MS: '-5' }, (m) => warnings.push(m)) === 300_000
+    && warnings.length === 1);
+}
+
 console.log(failed
   ? `\n❌ aloneness: ${failed} failed`
-  : '\n✅ aloneness (L2): scripted remote-audio timelines prove silence, reset, fail-closed, exactly-once, and timeout precedence.');
+  : '\n✅ aloneness (L2): scripted remote-audio timelines prove silence, empty room, reset, fail-closed, exactly-once, and timeout precedence.');
 process.exit(failed ? 1 : 0);

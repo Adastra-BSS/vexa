@@ -21,6 +21,14 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Optional, Protocol, runtime_checkable
 
+# The ``meeting.data`` keys a completed-artifact deletion erases, shared by every store so the fake
+# and the database cannot drift. The meeting row itself survives as a lifecycle tombstone, so any
+# key that says what was said, or who said it when, has to be named here or it outlives the purge.
+ARTIFACT_DATA_KEYS = (
+    "recordings", "processed", "notes", "share_grants", "transcript_viewers",
+    "speaker_events", "recording_t0_ms",
+)
+
 
 @runtime_checkable
 class TranscriptStore(Protocol):
