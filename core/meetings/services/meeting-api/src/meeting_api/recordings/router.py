@@ -16,7 +16,7 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .ports import RecordingRepo, Storage
 from .deletion import MeetingNotTerminal, delete_owned_recording
@@ -94,23 +94,6 @@ def _parse_range(range_header: Optional[str], total: int) -> Optional[tuple[int,
     if end < start:
         return None  # e.g. bytes=5-3 → ignore, serve full body
     return start, end
-
-
-async def _storage_size(storage: Storage, key: str) -> Optional[int]:
-    """Object size without fetching the body when the adapter exposes ``size``; else ``None``."""
-    sizer = getattr(storage, "size", None)
-    if sizer is None:
-        return None
-    return await sizer(key)
-
-
-async def _storage_get_range(storage: Storage, key: str, start: int, end: int) -> Optional[bytes]:
-    """Fetch ONLY ``[start, end]`` (inclusive) when the adapter exposes ``get_range`` (S3 passes the
-    Range through to ``get_object``); else ``None`` so the caller slices a full ``get()``."""
-    getter = getattr(storage, "get_range", None)
-    if getter is None:
-        return None
-    return await getter(key, start, end)
 
 
 def build_router(
@@ -345,41 +328,24 @@ def build_router(
             content_type = "application/octet-stream"
 
         # Honor HTTP Range so the <audio>/<video> element + dashboard proxy can seek without
-        # downloading the whole master. Resolve total size cheaply (S3 head) when we can; only fall
-        # back to fetching the full body if neither size() nor get_range() are available.
+        # downloading the whole master. The size comes from a head request, and the bytes are relayed
+        # piece by piece from storage: a long meeting's master, held whole, OOM-killed the pod.
+        # Content-Length is known before the first piece, so a client that receives fewer bytes
+        # (storage failing mid-relay) sees a truncated body, not a short file it takes as complete.
         range_header = request.headers.get("range") or request.headers.get("Range")
-        total = await _storage_size(storage, storage_path)
-        full_body: Optional[bytes] = None
-        if total is None:
-            full_body = await storage.get(storage_path)
-            total = len(full_body)
-
+        total = await storage.size(storage_path)
         rng = _parse_range(range_header, total)  # may raise 416
-        if rng is None:
-            data = full_body if full_body is not None else await storage.get(storage_path)
-            return Response(
-                content=data,
-                media_type=content_type,
-                headers={"Accept-Ranges": "bytes", "Content-Length": str(len(data))},
-            )
-
-        start, end = rng
-        slice_bytes: Optional[bytes] = None
-        if full_body is None:
-            slice_bytes = await _storage_get_range(storage, storage_path, start, end)
-        if slice_bytes is None:
-            if full_body is None:
-                full_body = await storage.get(storage_path)
-            slice_bytes = full_body[start : end + 1]
-        return Response(
-            content=slice_bytes,
-            status_code=206,
+        start, end = rng if rng is not None else (0, total - 1)
+        headers = {"Accept-Ranges": "bytes", "Content-Length": str(end - start + 1)}
+        if rng is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        if total == 0:
+            return Response(content=b"", media_type=content_type, headers=headers)
+        return StreamingResponse(
+            storage.iter_range(storage_path, start, end),
+            status_code=206 if rng is not None else 200,
             media_type=content_type,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Range": f"bytes {start}-{end}/{total}",
-                "Content-Length": str(len(slice_bytes)),
-            },
+            headers=headers,
         )
 
     return router

@@ -17,7 +17,24 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import Optional
+from typing import AsyncIterator, Optional
+
+# The piece size ``S3Storage.iter_range`` asks botocore for. It bounds how much of a master sits in
+# memory per relayed read; Azure's pieces are the SDK's own (``max_chunk_get_size``, 4 MiB).
+_S3_STREAM_PIECE_BYTES = 1024 * 1024
+
+_EXHAUSTED = object()
+
+
+async def _pull_pieces(run, pieces) -> AsyncIterator[bytes]:
+    """Relay a BLOCKING SDK piece iterator one ``next()`` at a time through ``run`` (the adapter's
+    thread offload). Each ``next()`` is a synchronous network read, so draining the iterator on the
+    event loop would stall it for the whole download - the G4 defect, a piece at a time."""
+    while True:
+        piece = await run(next, pieces, _EXHAUSTED)
+        if piece is _EXHAUSTED:
+            return
+        yield piece
 
 
 class S3Storage:
@@ -90,6 +107,18 @@ class S3Storage:
         # Pass the byte range through to S3 (inclusive offsets) so we fetch only the requested window.
         resp = await self._run(self._c().get_object, Bucket=self._bucket, Key=key, Range=f"bytes={start}-{end}")
         return await self._run(resp["Body"].read)
+
+    async def iter_range(self, key: str, start: int, end: int) -> AsyncIterator[bytes]:
+        resp = await self._run(self._c().get_object, Bucket=self._bucket, Key=key, Range=f"bytes={start}-{end}")
+        async for piece in _pull_pieces(self._run, resp["Body"].iter_chunks(chunk_size=_S3_STREAM_PIECE_BYTES)):
+            yield piece
+
+    async def upload_file(self, key: str, path: str, *, content_type: str) -> None:
+        # boto3's managed transfer reads the file in parts and goes multipart above its threshold.
+        await self._run(
+            self._c().upload_file, Filename=path, Bucket=self._bucket, Key=key,
+            ExtraArgs={"ContentType": content_type},
+        )
 
     async def exists(self, key: str) -> bool:
         from botocore.exceptions import ClientError
@@ -220,6 +249,29 @@ class AzureBlobStorage:
                 return self._c().download_blob(key, offset=start, length=end - start + 1).readall()
 
         return await self._run(_get)
+
+    async def iter_range(self, key: str, start: int, end: int) -> AsyncIterator[bytes]:
+        # ``download_blob`` itself fetches the first piece, so opening it is offloaded like the reads
+        # that follow, and is where a missing blob surfaces.
+        def _open():
+            with _as_key_error(key):
+                return iter(self._c().download_blob(key, offset=start, length=end - start + 1).chunks())
+
+        async for piece in _pull_pieces(self._run, await self._run(_open)):
+            yield piece
+
+    async def upload_file(self, key: str, path: str, *, content_type: str) -> None:
+        from azure.storage.blob import ContentSettings
+
+        # Handed the open file, the SDK uploads it as staged blocks instead of one in-memory body.
+        def _upload() -> None:
+            with open(path, "rb") as f:
+                self._c().upload_blob(
+                    name=key, data=f, overwrite=True,
+                    content_settings=ContentSettings(content_type=content_type),
+                )
+
+        await self._run(_upload)
 
     async def size(self, key: str) -> int:
         def _size() -> int:

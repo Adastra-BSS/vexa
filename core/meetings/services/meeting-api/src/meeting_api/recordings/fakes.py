@@ -11,13 +11,17 @@ in-process.
 """
 from __future__ import annotations
 
-from typing import Optional
+from pathlib import Path
+from typing import AsyncIterator, Optional
 
 
 class InMemoryStorage:
     """A dict-backed ``Storage`` (key → bytes)."""
 
     def __init__(self):
+        # ``iter_range`` hands an object over in pieces this size, small enough that every test
+        # object spans several and a consumer that only handles one piece is caught.
+        self.piece = 64
         self.blobs: dict[str, bytes] = {}
         self.content_types: dict[str, str] = {}
         # Object mtimes (epoch seconds). The budget janitor evicts oldest-first, so a fake that
@@ -62,6 +66,14 @@ class InMemoryStorage:
     async def get_range(self, key: str, start: int, end: int) -> bytes:
         # INCLUSIVE [start, end], like S3's get_object(Range=...).
         return self.blobs[key][start : end + 1]
+
+    async def iter_range(self, key: str, start: int, end: int) -> AsyncIterator[bytes]:
+        window = self.blobs[key][start : end + 1]
+        for offset in range(0, len(window), self.piece):
+            yield window[offset : offset + self.piece]
+
+    async def upload_file(self, key: str, path: str, *, content_type: str) -> None:
+        await self.upload(key, Path(path).read_bytes(), content_type=content_type)
 
     async def exists(self, key: str) -> bool:
         return key in self.blobs
