@@ -15,11 +15,13 @@ golden-locked — this module only orchestrates the IO + the JSONB bookkeeping a
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..obs import log_event
-from ..recording_codec import build_recording_master
+from ..recording_codec import build_recording_master, master_is_byte_concat
 from .jsonb import (
     SIGNAL_TAPE_PARTS,
     SIGNAL_TAPE_PART_FORMATS,
@@ -209,6 +211,32 @@ async def upload_signal_tape(
             "meeting_id": meeting_id, "part": part}
 
 
+async def _assemble_and_upload_master(
+    storage: Storage, keys: list[str], master_key: str, media_format: str
+) -> None:
+    """Join ``keys``' chunks into the master at ``master_key``.
+
+    A byte-concat master (webm audio and video) is appended to a temp file one chunk at a time and
+    uploaded from that file, so meeting-api holds about one chunk however long the meeting ran.
+    Built in memory it took about twice the recording - every chunk in a list, then the joined copy -
+    and a long meeting OOM-killed the pod. The file needs the master's size in free disk instead.
+
+    ``wav`` keeps the in-memory build: its header carries the summed length of every chunk, and no
+    deployment of ours records it."""
+    content_type = _content_type(media_format)
+    if not master_is_byte_concat(media_format):
+        chunks = [await storage.get(k) for k in keys]
+        await storage.upload(master_key, build_recording_master(chunks, media_format), content_type=content_type)
+        return
+
+    with tempfile.TemporaryDirectory(prefix="recording-master-") as workdir:
+        path = os.path.join(workdir, f"master.{media_format}")
+        with open(path, "wb") as master:
+            for key in keys:
+                master.write(await storage.get(key))
+        await storage.upload_file(master_key, path, content_type=content_type)
+
+
 async def finalize_master(
     repo: RecordingRepo,
     storage: Storage,
@@ -273,9 +301,7 @@ async def finalize_master(
                 fields={"recording_id": recording_id, "media_type": media_type,
                         "prior_assembled_count": assembled_count, "new_count": listed_count},
             )
-        chunks = [await storage.get(k) for k in keys]
-        master_bytes = build_recording_master(chunks, media_format)
-        await storage.upload(master_key, master_bytes, content_type=_content_type(media_format))
+        await _assemble_and_upload_master(storage, keys, master_key, media_format)
 
     # G3 — stamp the media-file finalized ATOMICALLY (read→modify→write under one row lock), so a late
     # concurrent chunk upload can't clobber the finalized master pointer (the master bytes are already
