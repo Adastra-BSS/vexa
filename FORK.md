@@ -54,7 +54,8 @@ others or from the pin. No upstream PR is open at present - this is a private-us
 | `attend-dev-<id>` (e.g. `attend-dev-adam`) | its owner, created from `attend-prod` | only the owner's Attend dev stack, and only when its `.env` says `VEXA_BRANCH=attend-dev-<id>`; Attend's deploy builds it on demand under its own channel (see `deploy/acr/README.md`) |
 
 A personal branch reaches prod only through a pull request into `attend-prod`. After that PR
-merges, re-sync the personal branch onto `attend-prod` before building on it again.
+merges, re-sync the personal branch onto `attend-prod` before building on it again. The full
+workflow, for new and returning developers: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ## Deliberately NOT fixed here: upstream #866
 

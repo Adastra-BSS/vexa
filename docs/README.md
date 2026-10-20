@@ -11,5 +11,7 @@ What remains here, deliberately repo-side:
 - [`views/`](views/) — **generated** architecture projections (`architecture.dsl`, `.mmd`) —
   written by `pnpm arch:dsl` / `arch:viz`, drift-checked by `gate:dataflow`. Never hand-edit.
 - [`test-scenarios/`](test-scenarios/) — internal manual test notes.
+- [`DEVELOPMENT.md`](DEVELOPMENT.md) — how the Attend team develops this fork: branches, personal
+  dev builds, the path to prod.
 - `ARCHITECTURE.md`, `DELIVERY*.md`, … — **pointer stubs** kept so historical links (issues,
   PRs, Discord) resolve; the content lives in `docs/docs/governance/`.
