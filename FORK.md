@@ -36,15 +36,25 @@ on every container recreation. A fork is what makes them survive.
 | `fix/spawn-defaults-honor-deployment-flags` | `request_bot` resolves both capture flags from the deployment when the caller has no opinion (`None`), so every caller — not only the HTTP route — honours `TRANSCRIBE_ENABLED` / `RECORDING_ENABLED`. `POST /bots` keeps its request-body resolvers, so an explicit value still wins and a non-boolean is still a 422. |
 | `fix/auto-join-stamps-every-spawn-refusal` | The sweep stamps `data.auto_join_error` for every way a spawn can refuse — the transcription and authenticated-bot config gates, plus a catch-all — instead of letting the exception abort the whole tick. No row is left `scheduled` with nothing written on it, and one row's failure no longer costs the rows behind it their bots. |
 | `feat/azure-stt-speaker-attribution` | Three seams, one capability: the shared STT client speaks the **Azure** envelope when its URL names a deployment (`api-key` header, URL verbatim, `response_format=json`, no faster-whisper-only parts) and rebuilds a window-spanning segment from a plain-`json` reply instead of collapsing it to `end: 0`; a **bilingual** room rides the sealed `allowedLanguages` (deployment knob `TRANSCRIPTION_ALLOWED_LANGUAGES=cs,en`) as a language set the model may switch between per window; and the bot boundary stops blanking the **lettered** speaker labels (`Speaker A/B/…`) — a letter is a refusal to *name*, not a refusal to *separate*, and blanking merged every unnamed voice into one anonymous run. `seg_N` and the bare contested `Speaker` still publish empty. |
-| `jana-pilot` (direct) | Join-lead instrumentation (pilot issue #40): the lifecycle callback stamps `data.lobby_at` on the advance to `awaiting_admission` and logs a `lobby_lead` event with `lead_s = scheduled_at - lobby_at` (warning level when negative, i.e. the bot reached the lobby after the scheduled start). Manual sends log `lead_s: null` but still record `lobby_at`, so their cold-start cost stays visible too. |
-| `jana-pilot` (direct) | Spawn-early-join-late (pilot issue #40): the auto-join sweep hands every scheduled dispatch `VEXA_JOIN_NOT_BEFORE = scheduled_at - AUTO_JOIN_LOBBY_LEAD_S` (default 60s) on the workload spec env - never on the sealed invocation.v1 - and the bot's join driver holds the join flow (browser idle on about:blank, hold capped at 10 min, a Stop during the hold still withdraws) until then. A generous `AUTO_JOIN_LEAD_S` now absorbs the pod cold start without the bot loitering in the lobby; manual sends carry no window and join immediately. |
-| `jana-pilot` (direct) | admin-api's `/internal/users/{id}/bot-context` no longer invents `bot_name: "Vexa"` when the user never chose a calendar bot name - the key is omitted, so the spawn flow's `DEFAULT_BOT_NAME` (the one place a deployment names its bot) applies to auto-joins exactly as it already did to manual sends. |
+| `attend-prod` (direct) | Join-lead instrumentation (pilot issue #40): the lifecycle callback stamps `data.lobby_at` on the advance to `awaiting_admission` and logs a `lobby_lead` event with `lead_s = scheduled_at - lobby_at` (warning level when negative, i.e. the bot reached the lobby after the scheduled start). Manual sends log `lead_s: null` but still record `lobby_at`, so their cold-start cost stays visible too. |
+| `attend-prod` (direct) | Spawn-early-join-late (pilot issue #40): the auto-join sweep hands every scheduled dispatch `VEXA_JOIN_NOT_BEFORE = scheduled_at - AUTO_JOIN_LOBBY_LEAD_S` (default 60s) on the workload spec env - never on the sealed invocation.v1 - and the bot's join driver holds the join flow (browser idle on about:blank, hold capped at 10 min, a Stop during the hold still withdraws) until then. A generous `AUTO_JOIN_LEAD_S` now absorbs the pod cold start without the bot loitering in the lobby; manual sends carry no window and join immediately. |
+| `attend-prod` (direct) | admin-api's `/internal/users/{id}/bot-context` no longer invents `bot_name: "Vexa"` when the user never chose a calendar bot name - the key is omitted, so the spawn flow's `DEFAULT_BOT_NAME` (the one place a deployment names its bot) applies to auto-joins exactly as it already did to manual sends. |
 
-`jana-pilot` is the integration branch carrying all three, and is what the pilot deploys.
+`attend-prod` is the integration branch carrying all three, and is what the pilot deploys.
 
 The changes are kept on **separate branches off an unmodified upstream `main`**, each standing on
 its own, so any of them can be offered upstream as a clean PR later without untangling it from the
 others or from the pin. No upstream PR is open at present - this is a private-use fork for now.
+
+## Branches and what deploys them
+
+| Branch | Who changes it | What runs it |
+|---|---|---|
+| `attend-prod` | pull requests only | every push builds the `jana-pilot` channel into the shared registry (`.github/workflows/build-attend-prod.yml`); Attend's prod stack deploys it on the next merge to Attend `main`, the shared ci stack on the next Attend PR commit |
+| `attend-dev-<id>` (e.g. `attend-dev-adam`) | its owner, created from `attend-prod` | only the owner's Attend dev stack, and only when its `.env` says `VEXA_BRANCH=attend-dev-<id>`; Attend's deploy builds it on demand under its own channel (see `deploy/acr/README.md`) |
+
+A personal branch reaches prod only through a pull request into `attend-prod`. After that PR
+merges, re-sync the personal branch onto `attend-prod` before building on it again.
 
 ## Deliberately NOT fixed here: upstream #866
 
