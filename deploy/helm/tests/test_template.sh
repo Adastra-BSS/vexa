@@ -263,6 +263,82 @@ else
   echo "  OK: Secret omits AZURE_STORAGE_CONNECTION_STRING when unset"
 fi
 
+# Keyless Azure Blob (IARD-131): an account URL plus workload identity replaces the shared-key
+# connection string, so the storage account can run with shared-key access disabled. The pod must
+# carry the URL, run as a ServiceAccount annotated with the identity's client id, and carry the
+# azure.workload.identity/use label the AKS webhook keys on to inject the federated token.
+RENDER_WI="$(helm template vexa "$CHART" -n vexa -f "$CHART/values-test.yaml" \
+  --set meetingApi.storageBackend=azure \
+  --set meetingApi.azureStorageAccountUrl=https://a.blob.core.windows.net \
+  --set meetingApi.serviceAccount.create=true \
+  --set meetingApi.serviceAccount.name=vexa-meeting-api \
+  --set-string meetingApi.serviceAccount.annotations."azure\.workload\.identity/client-id"=00000000-0000-0000-0000-000000000001 \
+  --set-string meetingApi.podLabels."azure\.workload\.identity/use"=true)"
+MA_WI="$(helm template vexa "$CHART" -n vexa -f "$CHART/values-test.yaml" \
+  --set meetingApi.storageBackend=azure \
+  --set meetingApi.azureStorageAccountUrl=https://a.blob.core.windows.net \
+  --set meetingApi.serviceAccount.create=true \
+  --set meetingApi.serviceAccount.name=vexa-meeting-api \
+  --set-string meetingApi.podLabels."azure\.workload\.identity/use"=true \
+  --show-only templates/deployment-meeting-api.yaml)"
+if grep -A1 -- '- name: AZURE_STORAGE_ACCOUNT_URL' <<< "$MA_WI" | grep -q 'value: "https://a.blob.core.windows.net"'; then
+  echo "  OK: meeting-api carries AZURE_STORAGE_ACCOUNT_URL"
+else
+  echo "  FAIL: AZURE_STORAGE_ACCOUNT_URL missing from the meeting-api Deployment"; fail=1
+fi
+if grep -qE '^      serviceAccountName: vexa-meeting-api$' <<< "$MA_WI"; then
+  echo "  OK: meeting-api runs as its own ServiceAccount when one is named"
+else
+  echo "  FAIL: meeting-api serviceAccountName not set"; fail=1
+fi
+if grep -qE '^        azure.workload.identity/use: "true"$' <<< "$MA_WI"; then
+  echo "  OK: meeting-api Pod template carries the workload identity label"
+else
+  echo "  FAIL: meetingApi.podLabels not rendered on the Pod template"; fail=1
+fi
+# The selector is immutable on a live Deployment: an extra pod label must never leak into it.
+if sed -n '/^  selector:/,/^  template:/p' <<< "$MA_WI" | grep -q 'azure.workload.identity'; then
+  echo "  FAIL: podLabels leaked into the meeting-api selector"; fail=1
+else
+  echo "  OK: podLabels stay out of the selector"
+fi
+SA_WI="$(helm template vexa "$CHART" -n vexa -f "$CHART/values-test.yaml" \
+  --set meetingApi.serviceAccount.create=true \
+  --set meetingApi.serviceAccount.name=vexa-meeting-api \
+  --set-string meetingApi.serviceAccount.annotations."azure\.workload\.identity/client-id"=00000000-0000-0000-0000-000000000001 \
+  --show-only templates/serviceaccount-meeting-api.yaml)"
+if grep -q '^kind: ServiceAccount' <<< "$SA_WI" && grep -qE '^  name: vexa-meeting-api$' <<< "$SA_WI" \
+  && grep -qE '^    azure.workload.identity/client-id: "?00000000-0000-0000-0000-000000000001"?$' <<< "$SA_WI"; then
+  echo "  OK: meeting-api ServiceAccount rendered with the client-id annotation"
+else
+  echo "  FAIL: meeting-api ServiceAccount missing or without the client-id annotation"; fail=1
+fi
+sa_count="$(grep -cE '^kind: ServiceAccount' <<< "$RENDER_WI" || true)"
+if [ "$sa_count" -eq 2 ]; then
+  echo "  OK: workload identity render adds exactly one ServiceAccount beside the runtime's ($sa_count)"
+else
+  echo "  FAIL: expected 2 ServiceAccounts (runtime + meeting-api), got $sa_count"; fail=1
+fi
+# Default render: no meeting-api ServiceAccount, and meeting-api keeps the namespace default.
+MA_DEF="$(helm template vexa "$CHART" -n vexa -f "$CHART/values-test.yaml" \
+  --show-only templates/deployment-meeting-api.yaml)"
+if grep -q 'vexa-meeting-api' <<< "$(sed -n '/^kind: ServiceAccount/,/^---/p' <<< "$RENDER")"; then
+  echo "  FAIL: default render carries a meeting-api ServiceAccount"; fail=1
+else
+  echo "  OK: default render has no meeting-api ServiceAccount"
+fi
+if grep -q 'serviceAccountName' <<< "$MA_DEF"; then
+  echo "  FAIL: default meeting-api Deployment sets a serviceAccountName"; fail=1
+else
+  echo "  OK: default meeting-api Deployment sets no serviceAccountName"
+fi
+# A deployment with in-call transcription off supplies no STT token; the ref must not block the Pod.
+if grep -A5 -- '- name: TRANSCRIPTION_SERVICE_TOKEN' <<< "$MA_DEF" | grep -q 'optional: true'; then
+  echo "  OK: TRANSCRIPTION_SERVICE_TOKEN secretKeyRef is optional"
+else
+  echo "  FAIL: TRANSCRIPTION_SERVICE_TOKEN secretKeyRef is not optional"; fail=1
+fi
+
 # #37 — digest pinning. A tag says which build you ASKED for and can be re-pointed afterwards; a
 # digest says which build is RUNNING. The AKS deployment pins every component by digest, so a
 # release manifest reports exactly what is on the nodes.

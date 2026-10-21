@@ -32,11 +32,25 @@ def _azurite_ok() -> bool:
 
 # ── dispatch + refusals (no network) ──────────────────────────────────────────────────────────────
 
-def test_azure_without_a_connection_string_refuses_and_names_the_key(monkeypatch, capsys):
+def test_azure_without_credentials_refuses_and_names_both_keys(monkeypatch, capsys):
     monkeypatch.setenv("STORAGE_BACKEND", "azure")
     monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT_URL", raising=False)
     assert ensure_container.main() == 2
-    assert "AZURE_STORAGE_CONNECTION_STRING" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "AZURE_STORAGE_CONNECTION_STRING" in err
+    assert "AZURE_STORAGE_ACCOUNT_URL" in err
+
+
+def test_azure_account_url_dispatches_without_a_connection_string(monkeypatch):
+    """The managed-identity path: the URL reaches ensure_azure and no connection string does."""
+    seen = {}
+    monkeypatch.setenv("STORAGE_BACKEND", "azure")
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_URL", "https://acct.blob.core.windows.net")
+    monkeypatch.setattr(ensure_container, "ensure_azure", lambda **kw: seen.update(kw) or False)
+    assert ensure_container.main() == 0
+    assert seen == {"container": "vexa", "account_url": "https://acct.blob.core.windows.net"}
 
 
 def test_unknown_backend_refuses(monkeypatch, capsys):
