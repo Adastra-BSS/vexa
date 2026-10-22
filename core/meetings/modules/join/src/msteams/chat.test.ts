@@ -1,5 +1,5 @@
 /**
- * Teams meeting-chat send — the routine behind the Attend join notice.
+ * Teams meeting-chat send - the routine behind the Attend join notice.
  *
  * Drives sendTeamsChatMessage against a fake page whose DOM is a real jsdom
  * document: the chat pane, its compose box and the rendered message list are

@@ -12,7 +12,7 @@ import { createJoinNotice, resolveJoinNotice, type NoticeSendResult } from './jo
 
 let failed = 0;
 const check = (name: string, cond: boolean, detail = '') => {
-  console.log(`  ${cond ? '✅' : '❌'} ${name}${cond ? '' : '  — ' + detail}`);
+  console.log(`  ${cond ? 'PASS' : 'FAIL'} ${name}${cond ? '' : '  - ' + detail}`);
   if (!cond) failed++;
 };
 
@@ -69,8 +69,8 @@ async function main() {
     check('a hung send -> reason=timeout', events[0]?.event === 'join_notice_failed' && events[0].fields.reason === 'timeout', JSON.stringify(events));
   }
 
-  if (failed) { console.error(`\n❌ join-notice: ${failed} check(s) FAILED.`); process.exit(1); }
-  console.log('\n✅ join-notice: off when empty, posted once, every outcome one event, never rejects.');
+  if (failed) { console.error(`\nFAIL join-notice: ${failed} check(s) FAILED.`); process.exit(1); }
+  console.log('\nPASS join-notice: off when empty, posted once, every outcome one event, never rejects.');
 }
 
 void main();

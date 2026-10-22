@@ -61,7 +61,7 @@ export interface OrchestratorDeps {
   /** Producer clock for lifecycle facts. Injected by tests; each logical event is stamped once
    *  before the lifecycle adapter performs any HTTP retry. */
   now?: () => string;
-  /** Optional — the join notice (join-notice.ts), posted once into the meeting chat as soon as
+  /** Optional - the join notice (join-notice.ts), posted once into the meeting chat as soon as
    *  capture runs. Fire-and-forget: it reports its own outcome and must never delay, fail or end
    *  the meeting. ABSENT ⇒ no notice (BOT_JOIN_NOTICE empty, or a platform without chat support). */
   notice?: JoinNotice;
