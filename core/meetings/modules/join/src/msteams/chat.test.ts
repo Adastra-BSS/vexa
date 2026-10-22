@@ -122,7 +122,9 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
   {
     const { page, actions, isPaneOpen } = fakePage();
     const result = await sendTeamsChatMessage(page, NOTICE, FAST);
-    check('result is ok', result, { ok: true });
+    check('result is ok', result.ok, true);
+    check('reports how long each wait took', result.ok && Object.keys(result.timings), ['button_ms', 'input_ms', 'delivery_ms']);
+    check('...as whole milliseconds', result.ok && Object.values(result.timings).every((ms) => Number.isInteger(ms) && ms >= 0), true);
     check('opens the pane, types each line with Shift+Enter between, sends with Enter, closes the pane', actions, [
       'open-pane',
       'focus-input',
@@ -139,7 +141,7 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
   {
     const { page, actions, isPaneOpen } = fakePage({ paneOpen: true });
     const result = await sendTeamsChatMessage(page, 'one line', FAST);
-    check('result is ok', result, { ok: true });
+    check('result is ok', result.ok, true);
     check('does not touch the chat button', actions.includes('open-pane') || actions.includes('close-pane'), false);
     check('leaves the pane open as it found it', isPaneOpen(), true);
   }
@@ -147,11 +149,11 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
   console.log('\n=== the toolbar is still settling right after admission ===');
   {
     const { page } = fakePage({ buttonAfterWaits: 3 });
-    check('a chat button that renders late is waited for', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: true });
+    check('a chat button that renders late is waited for', (await sendTeamsChatMessage(page, NOTICE, FAST)).ok, true);
   }
   {
     const { page } = fakePage({ enabledAfterWaits: 3 });
-    check('a chat button that enables late is waited for', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: true });
+    check('a chat button that enables late is waited for', (await sendTeamsChatMessage(page, NOTICE, FAST)).ok, true);
   }
 
   console.log('\n=== guest chat unavailable ===');

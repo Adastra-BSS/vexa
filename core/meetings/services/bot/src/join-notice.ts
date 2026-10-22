@@ -13,7 +13,11 @@ import { botEvent } from './telemetry.js';
 
 export const JOIN_NOTICE_ENV = 'BOT_JOIN_NOTICE';
 
-export type NoticeSendResult = { ok: true } | { ok: false; reason: string; detail?: string };
+/** `timings` are the sender's own phases in ms (for Teams: button_ms, input_ms, delivery_ms), so a
+ *  slow notice says whether Teams was slow to offer the chat or slow to deliver the message. */
+export type NoticeSendResult =
+  | { ok: true; timings?: Record<string, number> }
+  | { ok: false; reason: string; detail?: string };
 
 export interface JoinNotice {
   post(): Promise<void>;
@@ -58,7 +62,7 @@ export function createJoinNotice(opts: JoinNoticeOptions): JoinNotice | undefine
         clearTimeout(timer);
       }
       const base = { meeting_id: meetingId, duration_ms: Date.now() - startedAt };
-      if (result.ok) emit('join_notice_posted', base);
+      if (result.ok) emit('join_notice_posted', { ...base, ...(result.timings ?? {}) });
       else emit('join_notice_failed', { ...base, reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) });
     },
   };

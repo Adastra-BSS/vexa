@@ -47,6 +47,13 @@ async function main() {
     check('event never carries the notice text', !JSON.stringify(events).includes('recorded by'), JSON.stringify(events));
   }
 
+  {
+    const { events, emit } = recorder();
+    const timings = { button_ms: 1800, input_ms: 400, delivery_ms: 21000 };
+    await createJoinNotice({ text: NOTICE, emit, send: async () => ({ ok: true, timings }) })!.post();
+    check('the posted event says where the time went', events[0]?.fields.button_ms === 1800 && events[0].fields.delivery_ms === 21000, JSON.stringify(events));
+  }
+
   console.log('\n=== failed ===');
   {
     const { events, emit } = recorder();

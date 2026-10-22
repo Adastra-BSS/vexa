@@ -15,7 +15,17 @@ import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSele
 
 export type TeamsChatFailure = "chat_disabled" | "input_not_found" | "not_rendered" | "error";
 
-export type TeamsChatSendResult = { ok: true } | { ok: false; reason: TeamsChatFailure; detail?: string };
+/** Where a successful post spent its time: waiting for a usable chat button (0 when the pane was
+ *  already open), for the compose box, and from typing until the message showed in the list. */
+export type TeamsChatTimings = {
+  button_ms: number;
+  input_ms: number;
+  delivery_ms: number;
+};
+
+export type TeamsChatSendResult =
+  | { ok: true; timings: TeamsChatTimings }
+  | { ok: false; reason: TeamsChatFailure; detail?: string };
 
 export interface TeamsChatSendOptions {
   /** How long to wait for a usable chat button. Right after admission Teams is still building
@@ -107,6 +117,14 @@ export async function sendTeamsChatMessage(
   if (!needle) return { ok: false, reason: "error", detail: "empty message" };
 
   let openedPane: ChatLocator | null = null;
+  let mark = Date.now();
+  const lap = (): number => {
+    const now = Date.now();
+    const elapsed = now - mark;
+    mark = now;
+    return elapsed;
+  };
+  const timings: TeamsChatTimings = { button_ms: 0, input_ms: 0, delivery_ms: 0 };
   try {
     let input = await firstVisible(chatPage, teamsChatInputSelectors);
     if (!input) {
@@ -120,11 +138,14 @@ export async function sendTeamsChatMessage(
         chatPage,
       );
       if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
+      timings.button_ms = lap();
       await button.locator.click();
       openedPane = button.locator;
       input = await waitFor(() => firstVisible(chatPage, teamsChatInputSelectors), inputTimeoutMs, pollMs, chatPage);
       if (!input) return { ok: false, reason: "input_not_found" };
+      timings.input_ms = lap();
     }
+    lap();
 
     // One line at a time: Enter sends in Teams, Shift+Enter is the line break.
     await input.locator.click();
@@ -140,7 +161,9 @@ export async function sendTeamsChatMessage(
       pollMs,
       chatPage,
     );
-    return rendered ? { ok: true } : { ok: false, reason: "not_rendered" };
+    if (!rendered) return { ok: false, reason: "not_rendered" };
+    timings.delivery_ms = lap();
+    return { ok: true, timings };
   } catch (e: any) {
     return { ok: false, reason: "error", detail: String(e?.message || e).slice(0, 200) };
   } finally {
