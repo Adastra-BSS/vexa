@@ -120,8 +120,9 @@ compute.
 2. **The PR description** follows the template. In *Contribution rights*, tick the path that is
    true for you (for Adastra work, normally *Employer/client*), and sign every commit:
    `git commit --signoff`.
-3. **Checks:** `gates` must be green. `docs-current` and `merge-card` come from upstream's review
-   process and are not required on this fork.
+3. **Checks:** `gates` must be green. `docs-current` asks for a change under `docs/` or the
+   `docs: none` label. Upstream's sign-off checks (`merge-card`, `contribution-rights`, the
+   welcome comment) are removed from this fork: nobody here runs that review process.
 4. **Keep it compatible with today's Attend `main`.** A merge into `attend-prod` is built at once
    and reaches prod at the next merge to Attend `main`, *by anyone, for any reason*. New behaviour
    goes in off by default, or behind a setting Attend passes in.
