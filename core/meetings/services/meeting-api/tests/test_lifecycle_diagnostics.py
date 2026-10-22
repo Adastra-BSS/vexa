@@ -330,3 +330,35 @@ def test_an_unknown_alone_rule_is_not_persisted():
         "completion_reason": "left_alone", "alone_rule": "<script>",
     })[-1]
     assert "alone_rule" not in final["data"]
+
+
+@pytest.mark.parametrize("trigger", ["command", "removed"])
+def test_a_discard_is_persisted_on_the_meeting(trigger):
+    """The bot discards on objection ("attend discard" in the chat, or a participant removing it).
+    The meeting row has to say so: it is what deletes the meeting's data and what tells every
+    downstream consumer not to process it."""
+    terminal = {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "stopped" if trigger == "command" else "evicted",
+        "discarded": {"at": "2026-10-22T12:00:00.000Z", "trigger": trigger},
+    }
+    conforms(terminal, "LifecycleEvent")
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, terminal)[-1]
+    assert final["data"]["discarded"] == {"at": "2026-10-22T12:00:00.000Z", "trigger": trigger}
+
+
+@pytest.mark.parametrize("discarded", [True, "yes", {"trigger": "<script>", "at": "x"}, {"at": 1, "trigger": "command"}])
+def test_a_malformed_discard_is_not_persisted(discarded):
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "stopped", "discarded": discarded,
+    })[-1]
+    assert "discarded" not in final["data"]
+
+
+def test_a_discard_only_counts_on_the_terminal_event():
+    client, app, deliveries = _client()
+    events = _drive(client, JOINING, {**ACTIVE, "discarded": {"at": "2026-10-22T12:00:00.000Z", "trigger": "command"}})
+    assert "discarded" not in events[-1]["data"]

@@ -30,6 +30,8 @@ MAX_SPEAKER_EVENTS = 20_000
 # The bot's aloneness rules, which both complete a meeting as left_alone. Allow-listed because the
 # value is producer-supplied and lands verbatim in meeting.data.
 ALONE_RULES = frozenset({"empty-room", "silence"})
+#: How a meeting came to be discarded: "attend discard" in the chat, or a participant removing the bot.
+DISCARD_TRIGGERS = frozenset({"command", "removed"})
 
 
 class BotStatus(str, Enum):
@@ -256,6 +258,9 @@ class MeetingRecord:
     recording_t0_ms: Optional[int] = None
     #: Why a left_alone bot decided it was alone: the room emptied, or it fell silent.
     alone_rule: Optional[str] = None
+    #: Set when the bot discarded the meeting on objection - {"at", "trigger": command|removed}.
+    #: Everything the meeting left behind is deleted, and no consumer may process it.
+    discarded: Optional[Dict[str, str]] = None
     # User intent (parent's `meeting.data.stop_requested`) — set by the DELETE/stop path, read
     # first by the exit classifier so a user stop is never mis-attributed as a failure.
     stop_requested: bool = False
@@ -300,6 +305,8 @@ class MeetingRecord:
             d["recording_t0_ms"] = self.recording_t0_ms
         if self.alone_rule is not None:
             d["alone_rule"] = self.alone_rule
+        if self.discarded is not None:
+            d["discarded"] = dict(self.discarded)
         return d
 
 
@@ -532,6 +539,15 @@ class LifecycleSink:
                 rec.recording_t0_ms = int(event["recording_t0_ms"])
             if event.get("alone_rule") in ALONE_RULES:
                 rec.alone_rule = event["alone_rule"]
+            # A discard on objection. Additive like alone_rule, and unlike a completion_reason it
+            # survives the user-stop override - a discarded meeting stays discarded however it ended.
+            discarded = event.get("discarded")
+            if (
+                isinstance(discarded, dict)
+                and discarded.get("trigger") in DISCARD_TRIGGERS
+                and isinstance(discarded.get("at"), str)
+            ):
+                rec.discarded = {"at": discarded["at"][:40], "trigger": discarded["trigger"]}
 
         rec.status = to
         rec.history.append(to)

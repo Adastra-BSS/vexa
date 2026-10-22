@@ -241,6 +241,16 @@ def create_app(
     app.state.delivery_ledger = delivery_ledger
     # The lifecycle callback publishes each persisted FSM advance to bm:meeting:{id}:status so the
     # gateway /ws (which SUBSCRIBEs that channel) forwards a ws.v1 BotStatus frame to the dashboard.
+    # A meeting the bot discarded on objection is erased the way an owner's DELETE erases it. The
+    # store, storage and object deleter it needs are resolved below; the callback runs only later.
+    async def _erase_discarded(user_id: int, meeting_id: int) -> dict:
+        from .discard import erase_discarded_meeting
+
+        return await erase_discarded_meeting(
+            store=transcript_store, delete_recording_objects=_delete_recording_objects,
+            redis=redis, user_id=user_id, meeting_id=meeting_id,
+        )
+
     _mount_lifecycle(
         app,
         sink,
@@ -250,6 +260,7 @@ def create_app(
         redis,
         transcript_finalizer,
         delivery_ledger,
+        discard_eraser=_erase_discarded,
     )
 
     # --- bot_spawn: POST /bots (invocation.v1 + runtime.v1) ---
@@ -351,6 +362,7 @@ def _mount_lifecycle(
     redis: "object" = None,
     transcript_finalizer: "object" = None,
     delivery_ledger: "object" = None,
+    discard_eraser: "object" = None,
 ) -> None:
     """Register the lifecycle.v1 callback route on the unified app (the lifecycle receiver's
     ``/bots/internal/callback/lifecycle`` handler, sharing the app's TraceMiddleware).
@@ -590,9 +602,23 @@ def _mount_lifecycle(
             and isinstance(meeting_row, dict)
             and meeting_row.get("id") is not None
         )
+        # A discarded meeting is erased, never finalized: writing its words to durable storage
+        # only to delete them is the wrong order.
+        discarded = terminal_advanced and rec.discarded is not None
+        if discarded and discard_eraser is not None:
+            try:
+                erased = await discard_eraser(meeting_row["user_id"], meeting_row["id"])
+                log_event("meeting_discarded", audience="operator", span="lifecycle.callback",
+                          meeting_id=str(meeting_row["id"]),
+                          fields={"trigger": rec.discarded["trigger"], **erased})
+            except Exception as e:  # noqa: BLE001 — the row stays marked discarded; consumers skip it
+                log_event("meeting_discard_erase_failed", audience="system", level="warning",
+                          span="lifecycle.callback",
+                          fields={"meeting_id": meeting_row["id"], "error": str(e)})
         if (
             transcript_finalizer is not None
             and terminal_advanced
+            and not discarded
         ):
             terminal_meeting_id = meeting_row["id"]
             try:
