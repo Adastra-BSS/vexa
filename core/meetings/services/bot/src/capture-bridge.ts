@@ -704,6 +704,9 @@ export async function startCaptureBridge(
   activity?: RemoteAudioActivityTap,
   /** Who-spoke-when, kept for the post-call transcription that names diarized voices from it. */
   timeline?: SpeakerTimeline,
+  /** listenTeamsChat: read the Teams meeting chat for the bot's chat commands - new messages only,
+   *  delivered through `onChat`. Off, nobody's chat is read. */
+  options: { listenTeamsChat?: boolean } = {},
 ): Promise<() => Promise<void>> {
   const mixed = isMixedLanePlatform(inv.platform);
   const jitsi = inv.platform === 'jitsi';
@@ -796,7 +799,7 @@ export async function startCaptureBridge(
   // ── Start the page-side capture (VexaBrowserUtils preferred; production inline fallback). ──
   // The body of this callback runs IN THE BROWSER (Playwright serializes it); DOM globals are
   // reached via globalThis (this file type-checks against the Node lib — no DOM types here).
-  await page.evaluate(async ({ isMixed, isJitsi, isTeams, isZoom, botName, mainAudioGraceMs, mainAudioSilenceMs, mainAudioEnergyRms }) => {
+  await page.evaluate(async ({ isMixed, isJitsi, isTeams, isZoom, botName, mainAudioGraceMs, mainAudioSilenceMs, mainAudioEnergyRms, listenTeamsChat }) => {
     const w = (globalThis as any) as Record<string, any>;
     if (isMixed) {
       // Zoom/Teams: installRemoteAudioHook (installed pre-nav) mirrors each remote WebRTC audio
@@ -1037,6 +1040,15 @@ export async function startCaptureBridge(
         } else if (!w.VexaBrowserUtils?.createTeamsCaptions) {
           w.logBot?.('[TeamsCaptions] not in the browser bundle — continuing without captions');
         }
+        // The chat commands' reader. History is skipped: only what is written after the bot started
+        // can be a command to it. The pane must be open for messages to be in the DOM; the
+        // composition root keeps it open.
+        if (listenTeamsChat && w.VexaBrowserUtils?.createTeamsChat && !w.__vexaTeamsChat) {
+          w.__vexaTeamsChat = w.VexaBrowserUtils.createTeamsChat({
+            skipExisting: true,
+            onMessage: (m: { sender: string; text: string }) => w.__vexaChatMessage?.(m.sender, m.text),
+          });
+        }
       }
       if (isJitsi) {
         // Jitsi contributes the WHO + chat signals the mixed audio can't carry:
@@ -1098,6 +1110,7 @@ export async function startCaptureBridge(
       await w.__vexaRemoteAudioReady?.();
     }
   }, { isMixed: mixed, isJitsi: jitsi, isTeams: inv.platform === 'teams', isZoom: inv.platform === 'zoom', botName: inv.botName,
+      listenTeamsChat: Boolean(options.listenTeamsChat),
       // How long the Teams lane waits for the server mix before capturing every track instead.
       mainAudioGraceMs: Number(process.env.VEXA_TEAMS_MAIN_AUDIO_GRACE_MS || 15000),
       // How long a PICKED mix may stay wholly silent before the lane abandons it for every track.
@@ -1132,6 +1145,7 @@ export async function startCaptureBridge(
       try { w.__vexaCsrcPoll?.destroy?.(); w.__vexaCsrcPoll = null; } catch { /* best-effort */ }
       try { w.__vexaJitsiSpeakers?.destroy?.(); w.__vexaJitsiSpeakers = null; } catch { /* best-effort */ }
       try { w.__vexaJitsiChat?.destroy?.(); w.__vexaJitsiChat = null; } catch { /* best-effort */ }
+      try { w.__vexaTeamsChat?.destroy?.(); w.__vexaTeamsChat = null; } catch { /* best-effort */ }
       try { w.__vexaZoomSpeakers?.destroy?.(); w.__vexaZoomSpeakers = null; } catch { /* best-effort */ }
       try { if (w.__vexaMixRescan) { (globalThis as any).clearInterval(w.__vexaMixRescan); w.__vexaMixRescan = null; } } catch { /* */ }
       try { if (w.__vexaMixedCapture && typeof w.__vexaMixedCapture.stop === 'function') w.__vexaMixedCapture.stop(); } catch { /* best-effort */ }
