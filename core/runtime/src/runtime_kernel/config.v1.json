@@ -143,6 +143,15 @@
    ]
   },
   {
+   "key": "BOT_JOIN_NOTICE",
+   "class": "defaulted",
+   "default": "(unset — no notice)",
+   "description": "message each spawned bot posts once into the meeting chat right after admission (Teams); multi-line text forwarded verbatim; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
    "key": "BOT_SPEAKER_MIN_AUDIO_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",

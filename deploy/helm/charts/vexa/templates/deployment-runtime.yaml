@@ -67,6 +67,9 @@ spec:
             # toString, not `default ""`: 0 is a meaningful value here (rule off) that default would erase.
             - name: BOT_EMPTY_ROOM_WINDOW_MS
               value: {{ .Values.runtime.emptyRoomWindowMs | toString | quote }}
+            # quote escapes line breaks and quotes, so multi-line text lands in the env intact.
+            - name: BOT_JOIN_NOTICE
+              value: {{ .Values.runtime.joinNotice | default "" | quote }}
             - name: BOT_SPEAKER_MIN_AUDIO_SEC
               value: {{ .Values.runtime.speakerStream.minAudioSec | default "" | quote }}
             - name: BOT_SPEAKER_SUBMIT_INTERVAL_SEC
