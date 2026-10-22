@@ -157,6 +157,42 @@ check('container selectors fall back to body', teamsMeetingContainerSelectors.in
   check('chat: text intact', got?.text === 'the actual message text');
 }
 
+// ── createTeamsChat as a live listener (the bot's chat commands) ──────────────
+// The reader rescans on its 2 s poll; the shim's interval never fires, so the
+// test captures the callback and ticks it by hand, appending messages between ticks.
+{
+  const message = (sender: string, text: string, id: string) => e('div', { 'data-tid': 'chat-pane-message' }, [
+    t('div', sender, { 'data-tid': 'message-author-name' }),
+    t('div', text, { id: `content-${id}` }),
+  ]);
+  const append = (list: FakeEl, child: FakeEl) => { child.parentElement = list; list.kids.push(child); };
+  const realInterval = g.window.setInterval;
+  let tick: () => void = () => {};
+  g.window.setInterval = (fn: () => void) => { tick = fn; return 1 as any; };
+
+  const list = e('div', { 'data-tid': 'chat-pane-list' }, [message('Priya Nair', 'attend help', '100')]);
+  setDoc(e('body', {}, [list]));
+  const out: { sender: string; text: string }[] = [];
+  const chat = createTeamsChat({ onMessage: (m) => out.push(m), skipExisting: true });
+  check('listener: history already in the chat is not reported', out.length === 0);
+
+  append(list, message('Priya Nair', 'attend help', '101'));
+  tick();
+  check('listener: a message posted after start is reported', out.length === 1 && out[0].text === 'attend help');
+
+  append(list, message('Priya Nair', 'attend help', '102'));
+  tick();
+  check('listener: the same words sent again are a new message', out.length === 2);
+
+  list.kids.splice(1, 1);
+  append(list, message('Priya Nair', 'attend help', '101'));
+  tick();
+  check('listener: a re-rendered message is not reported twice', out.length === 2);
+
+  chat.destroy();
+  g.window.setInterval = realInterval;
+}
+
 // ── Speaker name resolution: Teams' stable `data-tid` on the [data-stream-type] wrapper ──
 // (the hashed-class name selectors rot every Teams release; this attribute pair is durable).
 {

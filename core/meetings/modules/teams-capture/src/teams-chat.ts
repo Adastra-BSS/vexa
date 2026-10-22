@@ -17,6 +17,9 @@ export interface TeamsChatMessage { sender: string; text: string }
 export interface TeamsChatOptions {
   log?: (m: string) => void;
   onMessage: (msg: TeamsChatMessage) => void;
+  /** Report only messages posted after the chat was first seen. A listener acting on what people
+   *  write (the bot's chat commands) must not act on the chat's history. */
+  skipExisting?: boolean;
 }
 
 export interface TeamsChat {
@@ -136,26 +139,37 @@ export function createTeamsChat(opts: TeamsChatOptions): TeamsChat {
       return `${e.tagName.toLowerCase()}${tid ? '[tid=' + tid + ']' : ''}${cls ? '.' + cls : ''}${aria ? '[al=' + aria.slice(0, 30) + ']' : ''}${t ? ' »' + t : ''}`;
     });
 
-  const emit = (node: Element) => {
+  // Teams' own message id (`content-<id>` on the body, or `data-mid`), so the same words sent twice
+  // are two messages while one message re-rendered on scroll stays one. Content is the fallback.
+  const messageKey = (node: Element, msg: TeamsChatMessage): string => {
+    const idEl = node.matches?.('[id^="content-"], [data-mid]') ? node : node.querySelector('[id^="content-"], [data-mid]');
+    const id = idEl?.getAttribute('data-mid') || idEl?.getAttribute('id');
+    return id ? `id:${id}` : `${msg.sender} ${msg.text}`;
+  };
+
+  const emit = (node: Element, silent = false) => {
     if (seenNodes.has(node)) return;
     seenNodes.add(node);
     const msg = extract(node);
     if (!msg) return;
-    const hash = `${msg.sender} ${msg.text}`;
+    const hash = messageKey(node, msg);
     if (seenHashes.has(hash)) return; // virtualized list re-renders the same item on scroll
     seenHashes.add(hash);
+    if (silent) return;
     recent.push(msg);
     if (recent.length > 30) recent.shift();
     log(`chat ${msg.sender}: ${msg.text.slice(0, 60)}`);
     try { opts.onMessage(msg); } catch { /* never break capture */ }
   };
 
-  const scanMessages = (root: ParentNode) => {
+  const scanMessages = (root: ParentNode, silent = false) => {
     for (const sel of MESSAGE_SELECTORS) {
       const nodes = root.querySelectorAll(sel);
-      if (nodes.length) { nodes.forEach((n) => emit(n)); return; }
+      if (nodes.length) { nodes.forEach((n) => emit(n, silent)); return; }
     }
   };
+  // Only the first container seen holds history; a remount after that may carry new messages.
+  let historyPending = Boolean(opts.skipExisting);
 
   const findContainer = (): Element | null => {
     for (const sel of CONTAINER_SELECTORS) {
@@ -174,7 +188,8 @@ export function createTeamsChat(opts: TeamsChatOptions): TeamsChat {
       container = found;
       observer.disconnect();
       observer.observe(container, { childList: true, subtree: true });
-      scanMessages(container);
+      scanMessages(container, historyPending);
+      historyPending = false;
       log(`chat container matched: ${matchedContainer}`);
     } else if (found) {
       scanMessages(container!);
