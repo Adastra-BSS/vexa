@@ -220,6 +220,35 @@ async function main(): Promise<void> {
     check('removal: sequence reached active', seq(lc.events).includes('active'));
   }
 
+  // ── join notice: posted once, after capture started, never gating the meeting ──
+  {
+    const lc = recordingSink();
+    const order: string[] = [];
+    const pipeline = { async start() { order.push('pipeline.start'); }, async stop() { /* */ } };
+    const notice = { async post() { order.push('notice.post'); } };
+    const o = createOrchestrator(inv(), { lifecycle: lc, join: mockJoin('admitted'), pipeline, acts: noopActs(), aloneness: noopAloneness(), notice });
+    const res = await o.run({ maxActiveMs: 5 });
+    check('notice: posted exactly once', order.filter((s) => s === 'notice.post').length === 1, JSON.stringify(order));
+    check('notice: posted after capture started', order.indexOf('pipeline.start') < order.indexOf('notice.post'), JSON.stringify(order));
+    check('notice: the meeting still completes normally', res.status === 'completed' && allConform(lc.events));
+  }
+  {
+    let posted = 0;
+    const notice = { async post() { posted++; } };
+    const o = createOrchestrator(inv(), { lifecycle: recordingSink(), join: mockJoin('rejected'), pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), notice });
+    await o.run();
+    check('notice: never posted when the bot was not admitted', posted === 0, String(posted));
+  }
+  {
+    const lc = recordingSink();
+    const hung = { post: () => new Promise<void>(() => { /* a chat that never answers */ }) };
+    const res = await createOrchestrator(inv(), { lifecycle: lc, join: mockJoin('admitted'), pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), notice: hung }).run({ maxActiveMs: 5 });
+    check('notice: a hung post does not hold the meeting', res.status === 'completed' && last(lc.events).completion_reason === 'max_bot_time_exceeded');
+    const rejecting = { post: () => Promise.reject(new Error('page gone')) };
+    const res2 = await createOrchestrator(inv(), { lifecycle: recordingSink(), join: mockJoin('admitted'), pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), notice: rejecting }).run({ maxActiveMs: 5 });
+    check('notice: a rejecting post does not change the outcome', res2.status === 'completed');
+  }
+
   // ── hard time cap → completed(max_bot_time_exceeded) ──
   {
     const lc = recordingSink();

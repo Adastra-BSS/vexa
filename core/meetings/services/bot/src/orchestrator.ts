@@ -34,6 +34,7 @@ import type {
   RecordingSink,
   ControlPlaneProbe,
 } from './ports.js';
+import type { JoinNotice } from './join-notice.js';
 
 export interface OrchestratorDeps {
   lifecycle: LifecycleSink;
@@ -60,6 +61,10 @@ export interface OrchestratorDeps {
   /** Producer clock for lifecycle facts. Injected by tests; each logical event is stamped once
    *  before the lifecycle adapter performs any HTTP retry. */
   now?: () => string;
+  /** Optional — the join notice (join-notice.ts), posted once into the meeting chat as soon as
+   *  capture runs. Fire-and-forget: it reports its own outcome and must never delay, fail or end
+   *  the meeting. ABSENT ⇒ no notice (BOT_JOIN_NOTICE empty, or a platform without chat support). */
+  notice?: JoinNotice;
 }
 
 /** The dedicated non-zero exit code for a pre-join control-plane-unreachable abort (#530). On
@@ -302,6 +307,8 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
       await emit('failed', { failure_stage: 'active', completion_reason: 'join_failure', reason: String(e), exit_code: 1 });
       return { exitCode: 1, status: 'failed', completionReason: 'join_failure' };
     }
+    // After capture started, not before: the notice says the meeting IS being recorded.
+    if (deps.notice) void deps.notice.post().catch(() => { /* the notice reports its own failure */ });
     const stopRemoval = deps.join.onRemoval(() => signalEnd?.('evicted'));
     const stopAloneness = deps.aloneness.onAlone(() => signalEnd?.('left_alone'));
     const cap = opts.maxActiveMs && opts.maxActiveMs > 0
