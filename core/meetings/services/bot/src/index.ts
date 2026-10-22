@@ -14,6 +14,7 @@
  * │    • Pipeline       → capture bridge → @vexa/{gmeet,mixed}-pipeline → @vexa/transcribe-whisper ✅ WIRED (L4 capture · L2/L3 lane)
  * │    • RecordingSink  → per-chunk upload to inv.recordingUploadUrl (master assembled server-side) ✅ WIRED (L4 upload · L3 sink)
  * │    • Speak          → acts.v1 `speak`/`speak_stop` → meeting-UI mic + VM TTS chain          ✅ WIRED (L4)
+ * │    • JoinNotice     → BOT_JOIN_NOTICE posted once into the Teams meeting chat after capture  WIRED (L2, L4 spike)
  * └─ The browser/capture/recording-upload/speak legs are BROWSER- or VM-resident → L4-gated
  *    (proven by the O6 VM run, not unit tests). The lane + assembler cores are L2/L3-proven.
  *
@@ -42,6 +43,8 @@ import {
   createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs, resolveEmptyRoomWindowMs,
 } from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
+import { createJoinNotice, resolveJoinNotice, type JoinNotice } from './join-notice.js';
+import { sendTeamsChatMessage } from '@vexa/join';
 import type {
   JoinDriver,
   Pipeline,
@@ -130,6 +133,19 @@ function voiceHandler(speak: SpeakController): (act: Act) => Promise<void> {
 }
 
 /**
+ * The join notice for this run (BOT_JOIN_NOTICE; empty ⇒ none). Teams posts it through the meeting
+ * chat. No other platform has a chat sender yet: a notice configured there is reported as
+ * `join_notice_failed(unsupported_platform)` rather than skipped silently, because a configured
+ * notice that never appears is a gap someone has to see.
+ */
+function joinNoticeFor(inv: Invocation, env: NodeJS.ProcessEnv, page: BrowserSession['page']): JoinNotice | undefined {
+  const send = inv.platform === 'teams'
+    ? (text: string) => sendTeamsChatMessage(page, text)
+    : async () => ({ ok: false as const, reason: 'unsupported_platform' });
+  return createJoinNotice({ text: resolveJoinNotice(env), send, meetingId: inv.meeting_id });
+}
+
+/**
  * Probe the SECONDARY control-plane channel (redis) for the reachability gate (#530). A fresh,
  * short-lived connection with a bounded connect timeout and NO reconnection — a single yes/no on
  * whether redis answers a PING. Never throws: any fault resolves to `false` (unreachable). Uses a
@@ -199,6 +215,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   let pipeline: Pipeline;
   let botPipeline: BotPipeline | null = null;
   let acts: ActsSource = liveActs;
+  let notice: JoinNotice | undefined;
   const recording = inv.recordingEnabled ? createBotRecordingSink({ inv, log: (m) => console.log(`[bot] ${m}`) }) : undefined;
   // O-TEL-1: persist the raw captured-signal.v1 stream for offline replay. Off ⇒ the tap is a
   // single undefined-check and the capture path is byte-for-byte unchanged. VEXA_CAPTURE_SIGNAL=1
@@ -299,6 +316,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // Voice: tee acts so `speak`/`speak_stop` reach the SpeakController (gated on voiceAgentEnabled).
     const speak = createSpeakController(session.page, inv);
     acts = teeActs(liveActs, voiceHandler(speak));
+    notice = joinNoticeFor(inv, env, session.page);
   } catch (e) {
     console.error(`[bot] browser launch/capture wiring failed — falling back to clean terminal failed: ${String(e)}`);
     join = noBrowserJoinDriver(String(e));
@@ -321,6 +339,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     aloneness,
     recording: recording as RecordingSink | undefined,
     reachability,
+    notice,
     degraded: () => {
       const faults = sttFaults.report();
       const timeline = speakerTimeline.snapshot();

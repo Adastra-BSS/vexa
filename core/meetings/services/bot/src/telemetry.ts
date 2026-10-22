@@ -275,6 +275,21 @@ export function signalEvent(event: string, fields: Record<string, unknown> = {})
   }));
 }
 
+/**
+ * One structured observation of something the bot did in the meeting that nothing downstream
+ * records - today the join notice (`join_notice_posted` / `join_notice_failed`). One JSON line on
+ * stdout, `event: bot.<name>`, queryable from the container logs. Fields must never carry meeting
+ * content (chat text, names): the line also lands in the botlog tape.
+ */
+export function botEvent(event: string, fields: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({
+    level: event.endsWith('failed') ? 'warn' : 'info',
+    msg: `[bot] ${event}`,
+    event: `bot.${event}`,
+    ...fields,
+  }));
+}
+
 export interface RecorderOptions {
   /** Directory for the session file (file writer). Created if absent. */
   dir?: string;
