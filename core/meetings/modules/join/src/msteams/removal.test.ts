@@ -22,8 +22,8 @@
  * Run: npx tsx src/msteams/removal.test.ts
  */
 
-import { checkForTeamsRemoval } from './removal';
-import { teamsRemovalIndicators } from './selectors';
+import { checkForTeamsRemoval, classifyTeamsRemoval } from './removal';
+import { teamsRemovalIndicators, teamsRemovedByParticipantIndicators } from './selectors';
 
 /**
  * Minimal Playwright-Page stand-in. `visible` = the selectors that resolve
@@ -94,6 +94,30 @@ const GENERIC_ALERTS = [
     'nothing visible → checkForTeamsRemoval = false',
     await checkForTeamsRemoval(mockPage([])),
     false,
+  );
+
+  // 5. Which ending it was. A participant removing the bot discards the recording (Attend's
+  //    objection path); every other ending keeps it, so the split must never read an ordinary end
+  //    - or a dropped connection - as a removal.
+  console.log('\n=== which ending: removed by a participant vs the call ending ===');
+  const kind = async (visible: string[]) => String(await classifyTeamsRemoval(mockPage(visible)));
+  for (const removed of [
+    'text="You\'ve been removed from this meeting"',
+    'text=You\'ve been removed from this meeting',
+    'text=You’ve been removed from this meeting',
+    'text=You have been removed from this meeting',
+    'text="Removed from meeting"',
+  ]) {
+    check(`${removed} → removed_by_participant`, (await kind([removed])) === 'removed_by_participant', true);
+  }
+  for (const ended of ['text=Meeting ended', 'text=Call ended', 'text=Connection lost', 'text=Unable to connect']) {
+    check(`${ended} → ended, never a removal`, (await kind([ended])) === 'ended', true);
+  }
+  check('nothing visible → no ending', (await kind([])) === 'null', true);
+  check(
+    'every removed-by-participant text is also a removal indicator',
+    teamsRemovedByParticipantIndicators.every((s) => teamsRemovalIndicators.includes(s)),
+    true,
   );
 
   console.log(`\n  ${passed} passed, ${failed} failed\n`);

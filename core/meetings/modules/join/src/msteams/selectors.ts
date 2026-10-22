@@ -92,9 +92,11 @@ export const teamsRejectionIndicators: string[] = [
   'button[aria-label*="denied"]'
 ];
 
-// Teams removal/error state indicators
-export const teamsRemovalIndicators: string[] = [
-  // Strong removal/error messages
+// A participant removed the bot from the meeting - as opposed to the call ending or the connection
+// dropping. Attend reads a removal as an objection and discards the recording, so this list must
+// hold the removal texts only. "You've been removed from this meeting" is what a removed guest sees
+// (Attend teams_chat_spike, 2026-10-22); "End meeting for everyone" shows none of these texts.
+export const teamsRemovedByParticipantIndicators: string[] = [
   'text="You\'ve been removed from this meeting"',
   'text=You\'ve been removed from this meeting',
   'text=You’ve been removed from this meeting', // typographic apostrophe (live Teams copy)
@@ -102,6 +104,12 @@ export const teamsRemovalIndicators: string[] = [
   'text=You have been removed from this meeting',
   'text="Removed from meeting"',
   'text=Removed from meeting',
+];
+
+// Teams removal/error state indicators
+export const teamsRemovalIndicators: string[] = [
+  // Strong removal/error messages
+  ...teamsRemovedByParticipantIndicators,
 
   // Error states
   'text="Meeting ended"',
