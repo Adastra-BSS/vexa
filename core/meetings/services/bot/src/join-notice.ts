@@ -25,7 +25,8 @@ export interface JoinNoticeOptions {
   /** Vexa's meeting id, carried on every event so a failure can be traced to its meeting. */
   meetingId?: string | number;
   emit?: (event: string, fields?: Record<string, unknown>) => void;
-  /** Upper bound on one post; the page is shared with the live capture, so it must not hang. */
+  /** Upper bound on one post; the page is shared with the live capture, so it must not hang. It
+   *  covers the chat send's own waits (toolbar 20 s, compose box 5 s, delivery 10 s). */
   timeoutMs?: number;
 }
 
@@ -35,7 +36,7 @@ export function resolveJoinNotice(env: NodeJS.ProcessEnv): string {
 
 /** The notice, or undefined when there is nothing to post. */
 export function createJoinNotice(opts: JoinNoticeOptions): JoinNotice | undefined {
-  const { text, send, meetingId, emit = botEvent, timeoutMs = 30_000 } = opts;
+  const { text, send, meetingId, emit = botEvent, timeoutMs = 60_000 } = opts;
   if (!text.trim()) return undefined;
   let started = false;
 

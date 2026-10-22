@@ -18,6 +18,9 @@ export type TeamsChatFailure = "chat_disabled" | "input_not_found" | "not_render
 export type TeamsChatSendResult = { ok: true } | { ok: false; reason: TeamsChatFailure; detail?: string };
 
 export interface TeamsChatSendOptions {
+  /** How long to wait for a usable chat button. Right after admission Teams is still building
+   *  the in-call toolbar: a single look 165 ms in found none on a live dev meeting. */
+  buttonTimeoutMs?: number;
   /** How long to wait for the compose box after opening the pane. */
   inputTimeoutMs?: number;
   /** How long to wait for the sent message to appear in the message list. */
@@ -56,6 +59,24 @@ export function chatMessageRendered({ needle, selectors }: { needle: string; sel
   return false;
 }
 
+/**
+ * Browser context: the labels of the in-call toolbar's buttons. Carried on a chat_disabled
+ * failure so it says what the bot could see - a "More" with no "Chat" is a toolbar that folded the
+ * button away, an empty list is a toolbar that never rendered.
+ */
+export function toolbarButtonLabels(): string[] {
+  const labels = Array.from(document.querySelectorAll('[role="toolbar"] button, button[id$="-button"]'))
+    .map((button) => (button.getAttribute("aria-label") || button.textContent || "").trim().slice(0, 40))
+    .filter(Boolean);
+  return Array.from(new Set(labels)).slice(0, 20);
+}
+
+async function chatUnavailableDetail(page: ChatPage): Promise<string> {
+  const shown = (await firstVisible(page, teamsChatButtonSelectors)) ? "chat button disabled" : "no chat button";
+  const labels = await page.evaluate(toolbarButtonLabels, undefined).catch(() => [] as string[]);
+  return `${shown}; toolbar: ${labels.length ? labels.join(", ") : "(none)"}`;
+}
+
 async function firstVisible(page: ChatPage, selectors: string[]): Promise<{ selector: string; locator: ChatLocator } | null> {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
@@ -80,7 +101,7 @@ export async function sendTeamsChatMessage(
   options: TeamsChatSendOptions = {},
 ): Promise<TeamsChatSendResult> {
   const chatPage = page as ChatPage;
-  const { inputTimeoutMs = 5000, renderTimeoutMs = 10000, pollMs = 250 } = options;
+  const { buttonTimeoutMs = 20000, inputTimeoutMs = 5000, renderTimeoutMs = 10000, pollMs = 250 } = options;
   const lines = text.split(/\r?\n/);
   const needle = lines.find((line) => line.trim())?.trim();
   if (!needle) return { ok: false, reason: "error", detail: "empty message" };
@@ -89,10 +110,16 @@ export async function sendTeamsChatMessage(
   try {
     let input = await firstVisible(chatPage, teamsChatInputSelectors);
     if (!input) {
-      const button = await firstVisible(chatPage, teamsChatButtonSelectors);
-      if (!button || !(await button.locator.isEnabled().catch(() => false))) {
-        return { ok: false, reason: "chat_disabled" };
-      }
+      const button = await waitFor(
+        async () => {
+          const found = await firstVisible(chatPage, teamsChatButtonSelectors);
+          return found && (await found.locator.isEnabled().catch(() => false)) ? found : null;
+        },
+        buttonTimeoutMs,
+        pollMs,
+        chatPage,
+      );
+      if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
       await button.locator.click();
       openedPane = button.locator;
       input = await waitFor(() => firstVisible(chatPage, teamsChatInputSelectors), inputTimeoutMs, pollMs, chatPage);

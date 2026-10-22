@@ -31,15 +31,26 @@ interface FakeOptions {
   delivers?: boolean;
   /** Make every click throw, as a detached page does. */
   clickThrows?: boolean;
+  /** The toolbar is still rendering: no chat button until this many waits have passed. */
+  buttonAfterWaits?: number;
+  /** The chat button shows disabled until this many waits have passed. */
+  enabledAfterWaits?: number;
 }
 
 /** A page whose visibility answers come from a jsdom document the fake keeps in sync. */
 function fakePage(opts: FakeOptions = {}) {
   const { chatButton = 'enabled', inputInPane = true, delivers = true, clickThrows = false } = opts;
   let paneOpen = opts.paneOpen ?? false;
+  let waits = 0;
+  const buttonState = () =>
+    waits < (opts.buttonAfterWaits ?? 0) ? 'absent' : waits < (opts.enabledAfterWaits ?? 0) ? 'disabled' : chatButton;
   let composed = '';
   const actions: string[] = [];
-  const dom = new JSDOM('<!doctype html><html><body><div id="pane"></div><div id="list"></div></body></html>');
+  const dom = new JSDOM(
+    '<!doctype html><html><body>'
+      + '<div role="toolbar"><button aria-label="People"></button><button aria-label="More"></button></div>'
+      + '<div id="pane"></div><div id="list"></div></body></html>',
+  );
   const doc = dom.window.document;
 
   const render = () => {
@@ -58,12 +69,12 @@ function fakePage(opts: FakeOptions = {}) {
         first() {
           return {
             async isVisible() {
-              if (isChatButton(sel)) return chatButton !== 'absent';
+              if (isChatButton(sel)) return buttonState() !== 'absent';
               if (isInput(sel)) return paneOpen && inputInPane;
               return false;
             },
             async isEnabled() {
-              return isChatButton(sel) ? chatButton === 'enabled' : true;
+              return isChatButton(sel) ? buttonState() === 'enabled' : true;
             },
             async click() {
               if (clickThrows) throw new Error('Target page, context or browser has been closed');
@@ -98,12 +109,12 @@ function fakePage(opts: FakeOptions = {}) {
       (globalThis as any).document = doc;
       return fn(arg);
     },
-    async waitForTimeout() { /* the fake has no clock to wait on */ },
+    async waitForTimeout() { waits++; },
   };
   return { page, actions, isPaneOpen: () => paneOpen };
 }
 
-const FAST = { inputTimeoutMs: 20, renderTimeoutMs: 20, pollMs: 1 };
+const FAST = { buttonTimeoutMs: 20, inputTimeoutMs: 20, renderTimeoutMs: 20, pollMs: 1 };
 const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je nahravana.';
 
 (async () => {
@@ -133,15 +144,28 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     check('leaves the pane open as it found it', isPaneOpen(), true);
   }
 
+  console.log('\n=== the toolbar is still settling right after admission ===');
+  {
+    const { page } = fakePage({ buttonAfterWaits: 3 });
+    check('a chat button that renders late is waited for', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: true });
+  }
+  {
+    const { page } = fakePage({ enabledAfterWaits: 3 });
+    check('a chat button that enables late is waited for', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: true });
+  }
+
   console.log('\n=== guest chat unavailable ===');
   {
     const { page, actions } = fakePage({ chatButton: 'absent' });
-    check('no chat button -> chat_disabled', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: false, reason: 'chat_disabled' });
+    const result = await sendTeamsChatMessage(page, NOTICE, FAST);
+    check('no chat button -> chat_disabled', !result.ok && result.reason, 'chat_disabled');
+    check('...naming what the toolbar did show', !result.ok && result.detail, 'no chat button; toolbar: People, More');
     check('nothing typed', actions.filter((a) => a.startsWith('type:')), []);
   }
   {
     const { page } = fakePage({ chatButton: 'disabled' });
-    check('disabled chat button -> chat_disabled', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: false, reason: 'chat_disabled' });
+    const result = await sendTeamsChatMessage(page, NOTICE, FAST);
+    check('disabled chat button -> chat_disabled', [!result.ok && result.reason, !result.ok && result.detail], ['chat_disabled', 'chat button disabled; toolbar: People, More']);
   }
 
   console.log('\n=== pane opens without a compose box ===');
