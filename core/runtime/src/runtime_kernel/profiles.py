@@ -131,8 +131,12 @@ def default_registry() -> ProfileRegistry:
             "BOT_SPEAKER_CONFIRM_THRESHOLD",
             "BOT_SPEAKER_MAX_BUFFER_SEC",
             "BOT_SPEAKER_IDLE_TIMEOUT_SEC",
-            # Free text, forwarded verbatim (multi-line, any language): the bot's join notice.
+            # Free text, forwarded verbatim (multi-line, any language): the bot's join notice and
+            # its chat commands' help text and replies.
             "BOT_JOIN_NOTICE",
+            "BOT_CHAT_HELP",
+            "BOT_CHAT_LEAVE_ACK",
+            "BOT_CHAT_DISCARD_ACK",
         )
         if os.environ.get(key, "").strip()
     }
