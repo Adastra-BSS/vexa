@@ -138,7 +138,8 @@ The defaults (`5` / `10`) match that budget.
 | `MINIO_BUCKET` | `vexa` | Bucket holding recordings and agent workspaces. |
 | `MINIO_SECURE` | `false` | Use TLS to reach MinIO. |
 | `STORAGE_BACKEND` | `minio` | Which object store recordings are written to: `minio` (any S3-compatible store) or `azure` (Azure Blob Storage). Also stamped into each recording's `storage_backend` field, so a recording says where its bytes went. |
-| `AZURE_STORAGE_CONNECTION_STRING` | — | Azure Blob connection string (account key or SAS). **Required** when `STORAGE_BACKEND=azure` — meeting-api refuses to start without it rather than accept recordings it cannot persist. |
+| `AZURE_STORAGE_CONNECTION_STRING` | - | Azure Blob connection string (account key or SAS). With `STORAGE_BACKEND=azure`, this or `AZURE_STORAGE_ACCOUNT_URL` is **required** - meeting-api refuses to start with neither rather than accept recordings it cannot persist. Wins when both are set. |
+| `AZURE_STORAGE_ACCOUNT_URL` | - | Keyless alternative to the connection string (helm only): the account's blob endpoint, `https://<account>.blob.core.windows.net`, authenticated with `DefaultAzureCredential` - on AKS, the pod's workload identity (chart values `meetingApi.serviceAccount` and `meetingApi.podLabels`). Lets the account run with shared-key access disabled; the identity needs Storage Blob Data Contributor. Used only when `AZURE_STORAGE_CONNECTION_STRING` is unset. |
 | `AZURE_STORAGE_CONTAINER` | `vexa` | Azure Blob container holding recordings. It must already exist; Vexa never creates it. |
 
 <Note>
