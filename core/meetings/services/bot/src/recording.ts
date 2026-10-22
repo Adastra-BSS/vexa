@@ -86,14 +86,16 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
   let finalSent = false;                               // has an is_final chunk been sent? (fallback guard)
   let maxSeq = -1;                                     // highest seq seen → the fallback's seq
   let lastFormat: RecordingMasterFormat = 'webm';      // format for the empty-final fallback
+  let aborted = false;                                 // discarded: nothing more leaves the bot
 
   const enqueue = (seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void => {
+    if (aborted) return;
     anyChunk = true;
     if (isFinal) finalSent = true;
     if (seq > maxSeq) maxSeq = seq;
     lastFormat = format;
     queue = queue
-      .then(() => upload(seq, isFinal, format, bytes))
+      .then(() => (aborted ? undefined : upload(seq, isFinal, format, bytes)))
       .catch((e) => { log(`recording: chunk ${seq} (isFinal=${isFinal}) upload failed — continuing: ${String(e)}`); });
   };
 
@@ -106,5 +108,6 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
       if (!anyChunk || finalSent) return;
       enqueue(maxSeq + 1, true, lastFormat, new Uint8Array(0));
     },
+    abort: (_key) => { aborted = true; },
   };
 }
