@@ -10,7 +10,9 @@
  *           ─► subscribe acts ─► await end ─► leave ─► completed
  *
  * End signals while active: an acts.v1 `leave` (→ stopped), host removal (→ evicted), or a
- * timeout (→ left_alone / max_bot_time_exceeded). Any failure short-circuits to `failed`
+ * timeout (→ left_alone / max_bot_time_exceeded). A discard - the chat's `attend discard` or a
+ * participant removing the bot - ends it the same way, aborts the recording and marks the terminal
+ * event `discarded`. Any failure short-circuits to `failed`
  * with the right failure_stage + completion_reason. Every transition is guarded by
  * `canTransition` — an illegal emit is a contract violation that throws.
  */
@@ -192,6 +194,17 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
     if (act.action === 'leave') stop('stopped');
   }
 
+  // The objection path. Recording stops being delivered at once, the meeting ends, and the terminal
+  // event carries `discarded` so meeting-api deletes what the meeting left behind. Once set it stays:
+  // a later leave or timeout still ends a discarded meeting.
+  let discarded: NonNullable<LifecycleEvent['discarded']> | null = null;
+  function discard(trigger: 'command' | 'removed', reason: CompletionReason = 'stopped'): void {
+    if (discarded) return;
+    discarded = { at: eventTime(), trigger };
+    deps.recording?.abort?.(recordingKey);
+    stop(reason);
+  }
+
   async function run(opts: RunOptions = {}): Promise<MeetingResult> {
     // ── reachability gate (#530, P18) — the FIRST lifecycle emit is LOAD-BEARING ──
     // The `joining` event must be sent regardless; we consult its delivery verdict. Reachable ⇒
@@ -309,7 +322,11 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
     }
     // After capture started, not before: the notice says the meeting IS being recorded.
     if (deps.notice) void deps.notice.post().catch(() => { /* the notice reports its own failure */ });
-    const stopRemoval = deps.join.onRemoval(() => signalEnd?.('evicted'));
+    // A participant removing the bot is an objection (discard); any other ending keeps the recording.
+    const stopRemoval = deps.join.onRemoval((kind) => {
+      if (kind === 'removed_by_participant') discard('removed', 'evicted');
+      else signalEnd?.('evicted');
+    });
     const stopAloneness = deps.aloneness.onAlone(() => signalEnd?.('left_alone'));
     const cap = opts.maxActiveMs && opts.maxActiveMs > 0
       ? setTimeout(() => signalEnd?.('max_bot_time_exceeded'), opts.maxActiveMs)
@@ -323,7 +340,8 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
     stopAloneness();
     stopRemoval();
     await deps.pipeline.stop().catch(() => { /* best-effort */ });
-    deps.recording?.close(recordingKey);
+    // A discarded recording gets no final signal: nothing of it is to be completed.
+    if (!discarded) deps.recording?.close(recordingKey);
     // Bound the leave: a hung platform leave (e.g. a slow Zoom web-client teardown) must not stall
     // the disposable worker past its SIGKILL grace — that would cut off the recording-master
     // assembly + the `completed` callback flush. Best-effort, raced against an 8s cap.
@@ -334,7 +352,7 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
 
     console.error(`[bot] orchestrator: emitting completed (reason=${reason}, from=${cur})`);
     try {
-      await emit('completed', { completion_reason: reason, exit_code: 0 });
+      await emit('completed', { completion_reason: reason, exit_code: 0, ...(discarded ? { discarded } : {}) });
       console.error('[bot] orchestrator: completed emitted + flushed');
     } catch (e) {
       console.error(`[bot] orchestrator: completed emit THREW: ${String(e)}`);
@@ -358,5 +376,10 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
     }
   }
 
-  return { run, handle, stop };
+  /** Whether the recording was discarded - the composition root then ships no signal tapes either. */
+  function isDiscarded(): boolean {
+    return discarded !== null;
+  }
+
+  return { run, handle, stop, discard, isDiscarded };
 }

@@ -13,6 +13,10 @@ import { botEvent } from './telemetry.js';
 
 export const JOIN_NOTICE_ENV = 'BOT_JOIN_NOTICE';
 
+/** Upper bound on one post. It outlasts the chat send's own waits - up to two minutes for Teams to
+ *  enable a guest's chat, then the compose box and delivery - so it only ever cuts a hung page. */
+export const JOIN_NOTICE_TIMEOUT_MS = 150_000;
+
 /** `timings` are the sender's own phases in ms (for Teams: button_ms, input_ms, delivery_ms), so a
  *  slow notice says whether Teams was slow to offer the chat or slow to deliver the message. */
 export type NoticeSendResult =
@@ -29,8 +33,8 @@ export interface JoinNoticeOptions {
   /** Vexa's meeting id, carried on every event so a failure can be traced to its meeting. */
   meetingId?: string | number;
   emit?: (event: string, fields?: Record<string, unknown>) => void;
-  /** Upper bound on one post; the page is shared with the live capture, so it must not hang. It
-   *  covers the chat send's own waits (toolbar 20 s, compose box 5 s, delivery 10 s). */
+  /** Upper bound on one post (default JOIN_NOTICE_TIMEOUT_MS); the page is shared with the live
+   *  capture, so it must not hang. */
   timeoutMs?: number;
 }
 
@@ -40,7 +44,7 @@ export function resolveJoinNotice(env: NodeJS.ProcessEnv): string {
 
 /** The notice, or undefined when there is nothing to post. */
 export function createJoinNotice(opts: JoinNoticeOptions): JoinNotice | undefined {
-  const { text, send, meetingId, emit = botEvent, timeoutMs = 60_000 } = opts;
+  const { text, send, meetingId, emit = botEvent, timeoutMs = JOIN_NOTICE_TIMEOUT_MS } = opts;
   if (!text.trim()) return undefined;
   let started = false;
 

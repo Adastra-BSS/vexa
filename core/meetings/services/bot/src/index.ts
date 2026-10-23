@@ -15,6 +15,7 @@
  * │    • RecordingSink  → per-chunk upload to inv.recordingUploadUrl (master assembled server-side) ✅ WIRED (L4 upload · L3 sink)
  * │    • Speak          → acts.v1 `speak`/`speak_stop` → meeting-UI mic + VM TTS chain          ✅ WIRED (L4)
  * │    • JoinNotice     → BOT_JOIN_NOTICE posted once into the Teams meeting chat after capture  WIRED (L2, L4 spike)
+ * │    • ChatCommands   → attend help/leave/discard read from the Teams chat; discard aborts it all WIRED (L2)
  * └─ The browser/capture/recording-upload/speak legs are BROWSER- or VM-resident → L4-gated
  *    (proven by the O6 VM run, not unit tests). The lane + assembler cores are L2/L3-proven.
  *
@@ -44,7 +45,9 @@ import {
 } from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
 import { createJoinNotice, resolveJoinNotice, type JoinNotice } from './join-notice.js';
-import { sendTeamsChatMessage } from '@vexa/join';
+import { createChatCommands, resolveChatCommandTexts, serializeSends, type ChatCommands } from './chat-commands.js';
+import { botEvent } from './telemetry.js';
+import { openTeamsChatPane, sendTeamsChatMessage } from '@vexa/join';
 import type {
   JoinDriver,
   Pipeline,
@@ -133,16 +136,45 @@ function voiceHandler(speak: SpeakController): (act: Act) => Promise<void> {
 }
 
 /**
- * The join notice for this run (BOT_JOIN_NOTICE; empty ⇒ none). Teams posts it through the meeting
- * chat. No other platform has a chat sender yet: a notice configured there is reported as
- * `join_notice_failed(unsupported_platform)` rather than skipped silently, because a configured
- * notice that never appears is a gap someone has to see.
+ * The bot's use of the meeting chat: the join notice (BOT_JOIN_NOTICE) and the chat commands
+ * (BOT_CHAT_HELP and the two replies; an empty help text turns them off). Both write through one
+ * serialized sender, so a reply never interleaves with the notice.
+ *
+ * Returns the hook the orchestrator runs once capture is up - post the notice, then, when the
+ * commands are on, make sure the pane stays open for their reader - and the commands themselves.
+ * Teams only: no other platform has a chat sender, so a notice configured there is reported as
+ * `join_notice_failed(unsupported_platform)` rather than skipped silently, and no commands run.
  */
-function joinNoticeFor(inv: Invocation, env: NodeJS.ProcessEnv, page: BrowserSession['page']): JoinNotice | undefined {
-  const send = inv.platform === 'teams'
-    ? (text: string) => sendTeamsChatMessage(page, text)
-    : async () => ({ ok: false as const, reason: 'unsupported_platform' });
-  return createJoinNotice({ text: resolveJoinNotice(env), send, meetingId: inv.meeting_id });
+function meetingChatFor(
+  inv: Invocation,
+  env: NodeJS.ProcessEnv,
+  page: BrowserSession['page'],
+  controls: { leave: () => void; discard: () => void },
+): { afterAdmission?: JoinNotice; commands?: ChatCommands } {
+  const teams = inv.platform === 'teams';
+  const texts = resolveChatCommandTexts(env);
+  const listening = teams && Boolean(texts.help);
+  const send = serializeSends((text: string) => sendTeamsChatMessage(page, text, { keepOpen: listening }));
+  const notice = createJoinNotice({
+    text: resolveJoinNotice(env),
+    meetingId: inv.meeting_id,
+    send: teams ? send : async () => ({ ok: false as const, reason: 'unsupported_platform' }),
+  });
+  const commands = listening
+    ? createChatCommands({ texts, botName: inv.botName, send, onLeave: controls.leave, onDiscard: controls.discard, meetingId: inv.meeting_id })
+    : undefined;
+  if (!notice && !commands) return {};
+  const afterAdmission: JoinNotice = {
+    async post() {
+      if (notice) await notice.post();
+      if (!commands) return;
+      // Already open after the notice; opened here when there is no notice, or the notice failed.
+      const opened = await openTeamsChatPane(page);
+      if (opened.ok) botEvent('chat_listening', { meeting_id: inv.meeting_id });
+      else botEvent('chat_listen_failed', { meeting_id: inv.meeting_id, reason: opened.reason, ...(opened.detail ? { detail: opened.detail } : {}) });
+    },
+  };
+  return { afterAdmission, commands };
 }
 
 /**
@@ -216,6 +248,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   let botPipeline: BotPipeline | null = null;
   let acts: ActsSource = liveActs;
   let notice: JoinNotice | undefined;
+  let commands: ChatCommands | undefined;
   const recording = inv.recordingEnabled ? createBotRecordingSink({ inv, log: (m) => console.log(`[bot] ${m}`) }) : undefined;
   // O-TEL-1: persist the raw captured-signal.v1 stream for offline replay. Off ⇒ the tap is a
   // single undefined-check and the capture path is byte-for-byte unchanged. VEXA_CAPTURE_SIGNAL=1
@@ -301,12 +334,25 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
         absolute_end_time: new Date(nowMs).toISOString(),
       }).catch((e) => console.error(`[bot] chat publish rejected: ${String(e)}`));
     };
+    // The meeting chat: the join notice, and the chat commands' leave/discard back into the
+    // orchestrator (built below; these only run once the meeting is active).
+    const chat = meetingChatFor(inv, env, sess.page, {
+      leave: () => orchestrator.stop('stopped'),
+      discard: () => orchestrator.discard('command'),
+    });
+    notice = chat.afterAdmission;
+    commands = chat.commands;
+    // Teams chat feeds the commands and nothing else - never the transcript. Jitsi chat is still
+    // published as transcript `chat` segments.
+    const onChat = inv.platform === 'teams'
+      ? (sender: string, text: string, sentAt?: string): void => { void commands?.handle({ sender, text, sentAt }); }
+      : publishChat;
     // #593: a post-admission subsystem failure must NEVER self-evict. createLivePipeline wraps the
     // page-side capture + recording attach + the engine start so pipeline.start() ALWAYS RESOLVES;
     // each failure surfaces LOUD via onFault (console with a full-fidelity serr(e)) instead of
     // throwing into the orchestrator's leave-on-fail backstop (which would hang the bot up).
     pipeline = createLivePipeline({
-      startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, publishChat, remoteAudioActivity, speakerTimeline),   // on the live meeting page
+      startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, onChat, remoteAudioActivity, speakerTimeline, { listenTeamsChat: Boolean(commands) }),   // on the live meeting page
       startRecording: rec ? () => startRecording(sess.page, inv, rec, (tMs) => speakerTimeline.markRecordingStart(tMs)) : undefined,          // MediaRecorder → recording.v1
       engine: bp,
       onFault: (stage, e) => {
@@ -316,7 +362,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // Voice: tee acts so `speak`/`speak_stop` reach the SpeakController (gated on voiceAgentEnabled).
     const speak = createSpeakController(session.page, inv);
     acts = teeActs(liveActs, voiceHandler(speak));
-    notice = joinNoticeFor(inv, env, session.page);
   } catch (e) {
     console.error(`[bot] browser launch/capture wiring failed — falling back to clean terminal failed: ${String(e)}`);
     join = noBrowserJoinDriver(String(e));
@@ -370,14 +415,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // The two teardown sidecars, written BEFORE the upload reads the directory. Both are
     // best-effort by construction: a diagnostic that can change how a meeting ended is worse than
     // no diagnostic. The log tap is released first so the snapshot's own line lands in the file.
-    await snapshot?.writeSnapshot().catch(() => { /* best-effort */ });
+    // A discarded meeting leaves nothing behind - not its transcript snapshot, not its tapes.
+    const discarded = orchestrator.isDiscarded();
+    if (!discarded) await snapshot?.writeSnapshot().catch(() => { /* best-effort */ });
     botLog?.stop();
     // O-TEL-1: ship the tape AFTER close() (the file is flushed and finalized there) and BEFORE the
     // process exits, because the container's disk dies with it. Best-effort by construction —
     // uploadSignalTapes never throws and never rejects, so nothing here can revise the exit code the
     // orchestrator already returned. Runs inside the 30s SIGTERM grace: one attempt, streamed, with
     // its own timeout, so a slow object store cannot ride the grace all the way to a SIGKILL.
-    await uploadSignalTapes(signalRecorder, { inv });
+    if (!discarded) await uploadSignalTapes(signalRecorder, { inv });
     if (session) await session.close().catch(() => { /* best-effort */ });
     // Quit the redis connections on teardown (best-effort — a quit failure must not change the
     // exit code; they may never have connected if redis was unreachable).

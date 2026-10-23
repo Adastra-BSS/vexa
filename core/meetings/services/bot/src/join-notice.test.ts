@@ -8,7 +8,8 @@
  *
  * Run: npx tsx src/join-notice.test.ts
  */
-import { createJoinNotice, resolveJoinNotice, type NoticeSendResult } from './join-notice.js';
+import { JOIN_NOTICE_TIMEOUT_MS, createJoinNotice, resolveJoinNotice, type NoticeSendResult } from './join-notice.js';
+import { TEAMS_CHAT_BUTTON_TIMEOUT_MS } from '@vexa/join';
 
 let failed = 0;
 const check = (name: string, cond: boolean, detail = '') => {
@@ -29,6 +30,9 @@ async function main() {
   check('unset -> off', resolveJoinNotice({}) === '');
   check('whitespace only -> off', resolveJoinNotice({ BOT_JOIN_NOTICE: ' \n ' }) === '');
   check('multi-line text kept, outer whitespace trimmed', resolveJoinNotice({ BOT_JOIN_NOTICE: `\n${NOTICE}\n` }) === NOTICE);
+
+  console.log('\n=== bound ===');
+  check('the notice outlasts the wait for Teams to enable the chat', JOIN_NOTICE_TIMEOUT_MS > TEAMS_CHAT_BUTTON_TIMEOUT_MS + 15_000, String(JOIN_NOTICE_TIMEOUT_MS));
 
   console.log('\n=== off ===');
   check('empty text -> no notice at all', createJoinNotice({ text: '', send: async () => ({ ok: true }) }) === undefined);

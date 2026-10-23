@@ -165,6 +165,29 @@ async function main(): Promise<void> {
       wire.map((w) => w.is_final).join(','));
   }
 
+  // ── discard: once aborted nothing more leaves the bot, not even the final signal ────────────
+  {
+    const seen: number[] = [];
+    let release: () => void = () => {};
+    const slow = new Promise<void>((r) => { release = r; });
+    const sink = createBotRecordingSink({
+      inv: inv(),
+      uploadChunk: async (seq) => { if (seq === 0) await slow; seen.push(seq); },
+    });
+    sink.chunk('k', 0, false, 'webm', new Uint8Array([1]));
+    await flush();                                   // chunk 0 is now uploading
+    sink.chunk('k', 1, false, 'webm', new Uint8Array([2]));
+    sink.abort('k');
+    sink.chunk('k', 2, false, 'webm', new Uint8Array([3]));
+    sink.close('k');
+    release();
+    await flush();
+    await flush();
+    check('abort: the chunk already uploading completes (it cannot be called back)', seen.includes(0), JSON.stringify(seen));
+    check('abort: queued chunks are dropped, later ones never queued', !seen.includes(1) && !seen.includes(2), JSON.stringify(seen));
+    check('abort: close() sends no final signal afterwards', seen.length === 1, JSON.stringify(seen));
+  }
+
   if (failed) { console.error(`\n❌ recording (L3): ${failed} check(s) FAILED.`); process.exit(1); }
   console.log('\n✅ recording (L3): each recording.v1 timeslice uploads immediately (seq-ordered, session_uid==connectionId); a mid-meeting kill leaves every finished part durable; the empty is_final signal is forwarded; close() synthesizes the final signal at most once (injected uploader + real RecordingService HTTP wire · no whole-recording buffering).');
 }

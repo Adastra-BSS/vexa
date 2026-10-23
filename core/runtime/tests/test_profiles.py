@@ -220,3 +220,19 @@ def test_command_overrides_ignore_blank_env(monkeypatch):
     reg = apply_command_overrides(default_registry())
     assert reg.resolve("meeting-bot").command is None  # image ENTRYPOINT is authoritative (#675)
     assert reg.resolve("agent").command == ["python", "-m", "worker"]
+
+
+def test_meeting_bot_forwards_the_chat_command_texts_verbatim(monkeypatch):
+    """The help text and the two replies are free text like the join notice, and an empty one
+    (commands off, or no reply) must not reach the bot."""
+    texts = {
+        "BOT_CHAT_HELP": 'Attend Notetaker - "attend leave" / "attend discard".\nPomoc: attend help',
+        "BOT_CHAT_LEAVE_ACK": "Leaving. The summary so far will be sent as usual.",
+        "BOT_CHAT_DISCARD_ACK": "",
+    }
+    for key, value in texts.items():
+        monkeypatch.setenv(key, value)
+    env = default_registry().get("meeting-bot").base_env
+    assert env["BOT_CHAT_HELP"] == texts["BOT_CHAT_HELP"]
+    assert env["BOT_CHAT_LEAVE_ACK"] == texts["BOT_CHAT_LEAVE_ACK"]
+    assert "BOT_CHAT_DISCARD_ACK" not in env

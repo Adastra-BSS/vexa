@@ -13,6 +13,12 @@
 import type { Page } from "playwright";
 import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors } from "./selectors";
 
+/** How long a guest's Chat button may take to become usable after admission. Teams builds the
+ *  guest's chat late and slowly on a small machine: on the bot's 0.75 vCPU the button showed but
+ *  stayed disabled for 22-30 s (Attend dev, 2026-10-23), and a 20 s wait lost the notice. The
+ *  button is polled, so a long bound costs nothing when Teams is quick. */
+export const TEAMS_CHAT_BUTTON_TIMEOUT_MS = 120_000;
+
 export type TeamsChatFailure = "chat_disabled" | "input_not_found" | "not_rendered" | "error";
 
 /** Where a successful post spent its time: waiting for a usable chat button (0 when the pane was
@@ -28,15 +34,19 @@ export type TeamsChatSendResult =
   | { ok: false; reason: TeamsChatFailure; detail?: string };
 
 export interface TeamsChatSendOptions {
-  /** How long to wait for a usable chat button. Right after admission Teams is still building
-   *  the in-call toolbar: a single look 165 ms in found none on a live dev meeting. */
+  /** How long to wait for a usable chat button (default TEAMS_CHAT_BUTTON_TIMEOUT_MS). Right
+   *  after admission Teams is still building the guest's chat. */
   buttonTimeoutMs?: number;
   /** How long to wait for the compose box after opening the pane. */
   inputTimeoutMs?: number;
   /** How long to wait for the sent message to appear in the message list. */
   renderTimeoutMs?: number;
   pollMs?: number;
+  /** Leave a pane this routine opened open, for a listener reading the chat (the bot's commands). */
+  keepOpen?: boolean;
 }
+
+export type TeamsChatOpenResult = { ok: true } | { ok: false; reason: "chat_disabled" | "input_not_found" | "error"; detail?: string };
 
 interface ChatLocator {
   isVisible(): Promise<boolean>;
@@ -105,50 +115,73 @@ async function waitFor<T>(probe: () => Promise<T | null | false>, timeoutMs: num
   }
 }
 
+type PaneOpening =
+  | { ok: true; input: { locator: ChatLocator }; openedPane: ChatLocator | null; button_ms: number; input_ms: number }
+  | { ok: false; reason: "chat_disabled" | "input_not_found"; detail?: string };
+
+type PaneFailure = Extract<PaneOpening, { ok: false }>;
+const paneFailed = (opening: PaneOpening): opening is PaneFailure => !opening.ok;
+const failure = (f: PaneFailure) => ({ ok: false as const, reason: f.reason, ...(f.detail ? { detail: f.detail } : {}) });
+
+/** Get the pane's compose box on screen: as it is if the pane is open, else wait for a usable Chat
+ *  button, click it and wait for the box. */
+async function openPane(chatPage: ChatPage, options: TeamsChatSendOptions): Promise<PaneOpening> {
+  const { buttonTimeoutMs = TEAMS_CHAT_BUTTON_TIMEOUT_MS, inputTimeoutMs = 5000, pollMs = 250 } = options;
+  const already = await firstVisible(chatPage, teamsChatInputSelectors);
+  if (already) return { ok: true, input: already, openedPane: null, button_ms: 0, input_ms: 0 };
+  const started = Date.now();
+  const button = await waitFor(
+    async () => {
+      const found = await firstVisible(chatPage, teamsChatButtonSelectors);
+      return found && (await found.locator.isEnabled().catch(() => false)) ? found : null;
+    },
+    buttonTimeoutMs,
+    pollMs,
+    chatPage,
+  );
+  if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
+  const clickedAt = Date.now();
+  await button.locator.click();
+  const input = await waitFor(() => firstVisible(chatPage, teamsChatInputSelectors), inputTimeoutMs, pollMs, chatPage);
+  if (!input) {
+    // Put the layout back: a pane with no compose box is of no use to anyone.
+    await button.locator.click().catch(() => { /* best-effort */ });
+    return { ok: false, reason: "input_not_found" };
+  }
+  return { ok: true, input, openedPane: button.locator, button_ms: clickedAt - started, input_ms: Date.now() - clickedAt };
+}
+
+/** Open the meeting chat pane and leave it open - for a listener that has nothing to post first.
+ *  Never throws. */
+export async function openTeamsChatPane(page: ChatPage | Page, options: TeamsChatSendOptions = {}): Promise<TeamsChatOpenResult> {
+  try {
+    const opened = await openPane(page as ChatPage, options);
+    return paneFailed(opened) ? failure(opened) : { ok: true };
+  } catch (e: any) {
+    return { ok: false, reason: "error", detail: String(e?.message || e).slice(0, 200) };
+  }
+}
+
 export async function sendTeamsChatMessage(
   page: ChatPage | Page,
   text: string,
   options: TeamsChatSendOptions = {},
 ): Promise<TeamsChatSendResult> {
   const chatPage = page as ChatPage;
-  const { buttonTimeoutMs = 20000, inputTimeoutMs = 5000, renderTimeoutMs = 10000, pollMs = 250 } = options;
+  const { renderTimeoutMs = 10000, pollMs = 250 } = options;
   const lines = text.split(/\r?\n/);
   const needle = lines.find((line) => line.trim())?.trim();
   if (!needle) return { ok: false, reason: "error", detail: "empty message" };
 
   let openedPane: ChatLocator | null = null;
-  let mark = Date.now();
-  const lap = (): number => {
-    const now = Date.now();
-    const elapsed = now - mark;
-    mark = now;
-    return elapsed;
-  };
-  const timings: TeamsChatTimings = { button_ms: 0, input_ms: 0, delivery_ms: 0 };
   try {
-    let input = await firstVisible(chatPage, teamsChatInputSelectors);
-    if (!input) {
-      const button = await waitFor(
-        async () => {
-          const found = await firstVisible(chatPage, teamsChatButtonSelectors);
-          return found && (await found.locator.isEnabled().catch(() => false)) ? found : null;
-        },
-        buttonTimeoutMs,
-        pollMs,
-        chatPage,
-      );
-      if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
-      timings.button_ms = lap();
-      await button.locator.click();
-      openedPane = button.locator;
-      input = await waitFor(() => firstVisible(chatPage, teamsChatInputSelectors), inputTimeoutMs, pollMs, chatPage);
-      if (!input) return { ok: false, reason: "input_not_found" };
-      timings.input_ms = lap();
-    }
-    lap();
+    const opened = await openPane(chatPage, options);
+    if (paneFailed(opened)) return failure(opened);
+    openedPane = opened.openedPane;
+    const typedAt = Date.now();
 
     // One line at a time: Enter sends in Teams, Shift+Enter is the line break.
-    await input.locator.click();
+    await opened.input.locator.click();
     for (const [index, line] of lines.entries()) {
       if (line) await chatPage.keyboard.insertText(line);
       if (index < lines.length - 1) await chatPage.keyboard.press("Shift+Enter");
@@ -162,11 +195,10 @@ export async function sendTeamsChatMessage(
       chatPage,
     );
     if (!rendered) return { ok: false, reason: "not_rendered" };
-    timings.delivery_ms = lap();
-    return { ok: true, timings };
+    return { ok: true, timings: { button_ms: opened.button_ms, input_ms: opened.input_ms, delivery_ms: Date.now() - typedAt } };
   } catch (e: any) {
     return { ok: false, reason: "error", detail: String(e?.message || e).slice(0, 200) };
   } finally {
-    if (openedPane) await openedPane.click().catch(() => { /* best-effort: the post already counted */ });
+    if (openedPane && !options.keepOpen) await openedPane.click().catch(() => { /* best-effort: the post already counted */ });
   }
 }

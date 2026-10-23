@@ -12,7 +12,7 @@
  */
 
 import { JSDOM } from 'jsdom';
-import { chatMessageRendered, sendTeamsChatMessage, type ChatPage } from './chat';
+import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, openTeamsChatPane, sendTeamsChatMessage, type ChatPage } from './chat';
 import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors } from './selectors';
 
 let passed = 0, failed = 0;
@@ -145,6 +145,34 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     check('does not touch the chat button', actions.includes('open-pane') || actions.includes('close-pane'), false);
     check('leaves the pane open as it found it', isPaneOpen(), true);
   }
+
+  console.log('\n=== keeping the pane open for a listener ===');
+  {
+    const { page, actions, isPaneOpen } = fakePage();
+    const result = await sendTeamsChatMessage(page, NOTICE, { ...FAST, keepOpen: true });
+    check('keepOpen: posted', result.ok, true);
+    check('keepOpen: the pane it opened stays open', [isPaneOpen(), actions.includes('close-pane')], [true, false]);
+  }
+  {
+    const { page, actions, isPaneOpen } = fakePage();
+    check('openTeamsChatPane: opens a closed pane', await openTeamsChatPane(page, FAST), { ok: true });
+    check('...and leaves it open', [isPaneOpen(), actions], [true, ['open-pane']]);
+  }
+  {
+    const { page, actions } = fakePage({ paneOpen: true });
+    check('openTeamsChatPane: an open pane is left as it is', [await openTeamsChatPane(page, FAST), actions], [{ ok: true }, []]);
+  }
+  {
+    const { page } = fakePage({ chatButton: 'absent' });
+    const result = await openTeamsChatPane(page, FAST);
+    check('openTeamsChatPane: no chat -> chat_disabled with what the toolbar showed',
+      [!result.ok && result.reason, !result.ok && result.detail], ['chat_disabled', 'no chat button; toolbar: People, More']);
+  }
+
+  console.log('\n=== how long Teams may take to enable a guest\'s chat ===');
+  // Measured on the bot's 0.75 vCPU (Attend dev, 2026-10-23): the Chat button showed but stayed
+  // disabled for 22-30 s after admission, so a 20 s wait lost the notice in two of three meetings.
+  check('the chat button is waited for at least two minutes', TEAMS_CHAT_BUTTON_TIMEOUT_MS >= 120_000, true);
 
   console.log('\n=== the toolbar is still settling right after admission ===');
   {
