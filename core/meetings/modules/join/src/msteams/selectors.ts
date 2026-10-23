@@ -253,6 +253,15 @@ export const teamsChatInputSelectors: string[] = [
   'textarea[aria-label*="Type a new message"]',
 ];
 
+// The pane's Send button, beside the compose box (the spike saw it as aria-label "Send"). A
+// message Enter left in the box - seen live once after a paste - is sent with it.
+export const teamsChatSendButtonSelectors: string[] = [
+  'button[data-tid="newMessageCommands-send"]',
+  'button[name="send"]',
+  'button[aria-label="Send"]',
+  'button[title="Send"]',
+];
+
 // One rendered entry of the message list - never the compose box, which holds the same text for a
 // moment after Enter. `[data-tid="chat-pane-message"]` matched live (teams_chat_spike).
 // BROWSER CONTEXT: consumed by chatMessageRendered via document.querySelectorAll.

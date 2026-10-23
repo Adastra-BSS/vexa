@@ -12,7 +12,12 @@
 
 import type { Page } from "playwright";
 import { renderChatText } from "./chat-format";
-import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors } from "./selectors";
+import {
+  teamsChatButtonSelectors,
+  teamsChatInputSelectors,
+  teamsChatMessageSelectors,
+  teamsChatSendButtonSelectors,
+} from "./selectors";
 
 /** How long a guest's Chat button may take to become usable after admission. Teams builds the
  *  guest's chat late and slowly on a small machine: on the bot's 0.75 vCPU the button showed but
@@ -31,8 +36,9 @@ export type TeamsChatTimings = {
 };
 
 export type TeamsChatSendResult =
-  /** `format`: `html` when the formatted text was pasted and Teams took it, `plain` when it was typed. */
-  | { ok: true; timings: TeamsChatTimings; format: "html" | "plain" }
+  /** `format`: `html` when the formatted text was pasted and Teams took it, `plain` when it was typed.
+   *  `resent`: Enter left the message in the compose box and the Send button sent it. */
+  | { ok: true; timings: TeamsChatTimings; format: "html" | "plain"; resent?: boolean }
   | { ok: false; reason: TeamsChatFailure; detail?: string };
 
 export interface TeamsChatSendOptions {
@@ -231,14 +237,30 @@ export async function sendTeamsChatMessage(
     }
     await chatPage.keyboard.press("Enter");
 
+    // Enter has been seen to leave a pasted message in the box (a help reply, live 2026-10-23);
+    // the pane's Send button sends whatever the box holds.
+    let resent = false;
+    const boxHasText = () => chatPage.evaluate(composeHasText, { selectors: teamsChatInputSelectors });
+    const cleared = await waitFor(async () => !(await boxHasText()), 1500, pollMs, chatPage);
+    if (!cleared) {
+      const send = await firstVisible(chatPage, teamsChatSendButtonSelectors);
+      if (send) {
+        await send.locator.click();
+        resent = true;
+      }
+    }
+
     const delivered = await waitFor(
       () => chatPage.evaluate(chatMessageRendered, { needle, selectors: teamsChatMessageSelectors }),
       renderTimeoutMs,
       pollMs,
       chatPage,
     );
-    if (!delivered) return { ok: false, reason: "not_rendered" };
-    return { ok: true, format, timings: { button_ms: opened.button_ms, input_ms: opened.input_ms, delivery_ms: Date.now() - typedAt } };
+    if (!delivered) {
+      const detail = (await boxHasText()) ? "text left in the compose box" : "the box emptied but the message never appeared";
+      return { ok: false, reason: "not_rendered", detail };
+    }
+    return { ok: true, format, ...(resent ? { resent: true } : {}), timings: { button_ms: opened.button_ms, input_ms: opened.input_ms, delivery_ms: Date.now() - typedAt } };
   } catch (e: any) {
     return { ok: false, reason: "error", detail: String(e?.message || e).slice(0, 200) };
   } finally {

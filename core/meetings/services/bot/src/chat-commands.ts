@@ -2,7 +2,7 @@
  * The bot's chat commands: anyone in the meeting can write `attend help`, `attend leave` or
  * `attend discard` in the meeting chat (any case, colon optional).
  *
- *   help     the help text (legal basics, what the commands do); at most once per 30 s
+ *   help     the help text (legal basics, what the commands do), every time it is asked
  *   leave    reply, then leave - what was recorded so far is processed as usual
  *   discard  reply, then leave and discard everything recorded (the orchestrator's discard path)
  *
@@ -44,8 +44,8 @@ export interface ChatCommandsOptions {
   meetingId?: string | number;
   emit?: (event: string, fields?: Record<string, unknown>) => void;
   now?: () => number;
-  helpIntervalMs?: number;
-  /** A reply that does not land within this is given up on, so a slow chat never stalls a leave. */
+  /** A reply that does not land within this (default 20 s - delivery, plus the Send-button retry) is
+   *  given up on, so a slow chat never stalls a leave. */
   replyTimeoutMs?: number;
 }
 
@@ -78,10 +78,9 @@ export function serializeSends<R>(send: (text: string) => Promise<R>): (text: st
 /** The commands, or undefined when the help text is empty (commands off). */
 export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | undefined {
   const { texts, send, onLeave, onDiscard, meetingId, emit = botEvent, now = Date.now } = opts;
-  const { helpIntervalMs = 30_000, replyTimeoutMs = 15_000 } = opts;
+  const { replyTimeoutMs = 20_000 } = opts;
   if (!texts.help) return undefined;
   const self = opts.botName.trim().toLowerCase();
-  let lastHelpAt: number | null = null;
   let ended = false;
 
   const reply = async (command: ChatCommand, text: string): Promise<void> => {
@@ -101,10 +100,13 @@ export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | un
     }
     if (result.ok) {
       emit('chat_reply_posted', {
-        meeting_id: meetingId, command, duration_ms: now() - startedAt, ...(result.timings ?? {}), ...(result.format ? { format: result.format } : {}),
+        meeting_id: meetingId, command, duration_ms: now() - startedAt, ...(result.timings ?? {}),
+        ...(result.format ? { format: result.format } : {}), ...(result.resent ? { resent: true } : {}),
       });
     }
-    if (!result.ok) emit('chat_reply_failed', { meeting_id: meetingId, command, reason: result.reason });
+    if (!result.ok) {
+      emit('chat_reply_failed', { meeting_id: meetingId, command, reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) });
+    }
   };
 
   return {
@@ -116,11 +118,7 @@ export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | un
       const age = Number.isFinite(sent) ? { age_ms: Math.max(0, now() - sent) } : {};
 
       if (command === 'help') {
-        const at = now();
-        const limited = lastHelpAt !== null && at - lastHelpAt < helpIntervalMs;
-        emit('chat_command', { meeting_id: meetingId, command, ...age, ...(limited ? { rate_limited: true } : {}) });
-        if (limited) return;
-        lastHelpAt = at;
+        emit('chat_command', { meeting_id: meetingId, command, ...age });
         await reply(command, texts.help);
         return;
       }
