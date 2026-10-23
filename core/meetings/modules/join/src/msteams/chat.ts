@@ -235,18 +235,23 @@ export async function sendTeamsChatMessage(
         if (index < lines.length - 1) await chatPage.keyboard.press("Shift+Enter");
       }
     }
-    await chatPage.keyboard.press("Enter");
-
-    // Enter has been seen to leave a pasted message in the box (a help reply, live 2026-10-23);
-    // the pane's Send button sends whatever the box holds.
+    // A pasted message is sent with the pane's Send button: live, Enter left every pasted reply in
+    // the box (2026-10-23), and waiting that out cost each reply 1.5 s. Typed text is sent with
+    // Enter, which works; should Enter leave anything behind, the Send button sends it.
     let resent = false;
     const boxHasText = () => chatPage.evaluate(composeHasText, { selectors: teamsChatInputSelectors });
-    const cleared = await waitFor(async () => !(await boxHasText()), 1500, pollMs, chatPage);
-    if (!cleared) {
-      const send = await firstVisible(chatPage, teamsChatSendButtonSelectors);
-      if (send) {
-        await send.locator.click();
-        resent = true;
+    const sendButton = format === "html" ? await firstVisible(chatPage, teamsChatSendButtonSelectors) : null;
+    if (sendButton) {
+      await sendButton.locator.click();
+    } else {
+      await chatPage.keyboard.press("Enter");
+      const cleared = await waitFor(async () => !(await boxHasText()), 1500, pollMs, chatPage);
+      if (!cleared) {
+        const send = await firstVisible(chatPage, teamsChatSendButtonSelectors);
+        if (send) {
+          await send.locator.click();
+          resent = true;
+        }
       }
     }
 

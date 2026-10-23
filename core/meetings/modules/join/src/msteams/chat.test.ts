@@ -170,6 +170,10 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     const { page, actions } = fakePage({ pasteWorks: true });
     const result = await sendTeamsChatMessage(page, '**Attend Notetaker**\n- **Retention:** 3 years', FAST);
     check('a formatted text is pasted as HTML and sent', [result.ok, actions.includes('paste-html'), actions.some((a) => a.startsWith('type:'))], [true, true, false]);
+    // Live, Enter never sent a pasted message (2026-10-23, every reply needed the button): a paste
+    // goes straight to the Send button, so no reply waits out an Enter that does nothing.
+    check('...straight with the Send button, no Enter first', [actions.includes('click-send'), actions.includes('press:Enter')], [true, false]);
+    check('...which is the normal path, not a retry', result.ok && result.resent, undefined);
     check('...and says it went formatted', result.ok && result.format, 'html');
   }
   {
