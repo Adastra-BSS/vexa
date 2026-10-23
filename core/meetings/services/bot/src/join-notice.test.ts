@@ -54,8 +54,9 @@ async function main() {
   {
     const { events, emit } = recorder();
     const timings = { button_ms: 1800, input_ms: 400, delivery_ms: 21000 };
-    await createJoinNotice({ text: NOTICE, emit, send: async () => ({ ok: true, timings }) })!.post();
+    await createJoinNotice({ text: NOTICE, emit, send: async () => ({ ok: true, timings, format: 'html' }) })!.post();
     check('the posted event says where the time went', events[0]?.fields.button_ms === 1800 && events[0].fields.delivery_ms === 21000, JSON.stringify(events));
+    check('...and whether it went formatted or plain', events[0]?.fields.format === 'html', JSON.stringify(events));
   }
 
   console.log('\n=== failed ===');

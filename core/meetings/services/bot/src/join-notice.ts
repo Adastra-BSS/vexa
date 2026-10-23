@@ -20,7 +20,7 @@ export const JOIN_NOTICE_TIMEOUT_MS = 150_000;
 /** `timings` are the sender's own phases in ms (for Teams: button_ms, input_ms, delivery_ms), so a
  *  slow notice says whether Teams was slow to offer the chat or slow to deliver the message. */
 export type NoticeSendResult =
-  | { ok: true; timings?: Record<string, number> }
+  | { ok: true; timings?: Record<string, number>; format?: string }
   | { ok: false; reason: string; detail?: string };
 
 export interface JoinNotice {
@@ -66,7 +66,7 @@ export function createJoinNotice(opts: JoinNoticeOptions): JoinNotice | undefine
         clearTimeout(timer);
       }
       const base = { meeting_id: meetingId, duration_ms: Date.now() - startedAt };
-      if (result.ok) emit('join_notice_posted', { ...base, ...(result.timings ?? {}) });
+      if (result.ok) emit('join_notice_posted', { ...base, ...(result.timings ?? {}), ...(result.format ? { format: result.format } : {}) });
       else emit('join_notice_failed', { ...base, reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) });
     },
   };
