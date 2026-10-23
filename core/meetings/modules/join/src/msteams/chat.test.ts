@@ -12,7 +12,7 @@
  */
 
 import { JSDOM } from 'jsdom';
-import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, openTeamsChatPane, sendTeamsChatMessage, type ChatPage } from './chat';
+import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, openTeamsChatPane, pasteChatHtml, sendTeamsChatMessage, type ChatPage } from './chat';
 import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors } from './selectors';
 
 let passed = 0, failed = 0;
@@ -35,6 +35,8 @@ interface FakeOptions {
   buttonAfterWaits?: number;
   /** The chat button shows disabled until this many waits have passed. */
   enabledAfterWaits?: number;
+  /** Whether the compose box takes a pasted HTML message (Teams renders it formatted). */
+  pasteWorks?: boolean;
 }
 
 /** A page whose visibility answers come from a jsdom document the fake keeps in sync. */
@@ -107,6 +109,12 @@ function fakePage(opts: FakeOptions = {}) {
     },
     async evaluate<R, A>(fn: (arg: A) => R, arg: A): Promise<R> {
       (globalThis as any).document = doc;
+      // jsdom has no ClipboardEvent: the fake stands in for the editor taking (or refusing) a paste.
+      if ((fn as unknown) === pasteChatHtml) {
+        actions.push('paste-html');
+        if (opts.pasteWorks) { composed = (arg as unknown as { html: string }).html; render(); }
+        return undefined as R;
+      }
       return fn(arg);
     },
     async waitForTimeout() { waits++; },
@@ -144,6 +152,25 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     check('result is ok', result.ok, true);
     check('does not touch the chat button', actions.includes('open-pane') || actions.includes('close-pane'), false);
     check('leaves the pane open as it found it', isPaneOpen(), true);
+  }
+
+  console.log('\n=== formatted messages are pasted, plain ones typed ===');
+  {
+    const { page, actions } = fakePage({ pasteWorks: true });
+    const result = await sendTeamsChatMessage(page, '**Attend Notetaker**\n- **Retention:** 3 years', FAST);
+    check('a formatted text is pasted as HTML and sent', [result.ok, actions.includes('paste-html'), actions.some((a) => a.startsWith('type:'))], [true, true, false]);
+    check('...and says it went formatted', result.ok && result.format, 'html');
+  }
+  {
+    const { page, actions } = fakePage({ pasteWorks: false });
+    const result = await sendTeamsChatMessage(page, '**Attend Notetaker**\n- **Retention:** 3 years', FAST);
+    check('a refused paste falls back to typing the plain text', actions.filter((a) => a.startsWith('type:')), ['type:Attend Notetaker', 'type:- Retention: 3 years']);
+    check('...and says it went plain', [result.ok, result.ok && result.format], [true, 'plain']);
+  }
+  {
+    const { page, actions } = fakePage({ pasteWorks: true });
+    const result = await sendTeamsChatMessage(page, 'just words', FAST);
+    check('unformatted text is typed, never pasted', [result.ok && result.format, actions.includes('paste-html')], ['plain', false]);
   }
 
   console.log('\n=== keeping the pane open for a listener ===');

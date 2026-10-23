@@ -99,8 +99,12 @@ export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | un
     } finally {
       clearTimeout(timer);
     }
-    if (result.ok) emit('chat_reply_posted', { meeting_id: meetingId, command, duration_ms: now() - startedAt, ...(result.timings ?? {}) });
-    else emit('chat_reply_failed', { meeting_id: meetingId, command, reason: result.reason });
+    if (result.ok) {
+      emit('chat_reply_posted', {
+        meeting_id: meetingId, command, duration_ms: now() - startedAt, ...(result.timings ?? {}), ...(result.format ? { format: result.format } : {}),
+      });
+    }
+    if (!result.ok) emit('chat_reply_failed', { meeting_id: meetingId, command, reason: result.reason });
   };
 
   return {

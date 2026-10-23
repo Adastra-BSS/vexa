@@ -11,6 +11,7 @@
  */
 
 import type { Page } from "playwright";
+import { renderChatText } from "./chat-format";
 import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors } from "./selectors";
 
 /** How long a guest's Chat button may take to become usable after admission. Teams builds the
@@ -30,7 +31,8 @@ export type TeamsChatTimings = {
 };
 
 export type TeamsChatSendResult =
-  | { ok: true; timings: TeamsChatTimings }
+  /** `format`: `html` when the formatted text was pasted and Teams took it, `plain` when it was typed. */
+  | { ok: true; timings: TeamsChatTimings; format: "html" | "plain" }
   | { ok: false; reason: TeamsChatFailure; detail?: string };
 
 export interface TeamsChatSendOptions {
@@ -89,6 +91,33 @@ export function toolbarButtonLabels(): string[] {
     .map((button) => (button.getAttribute("aria-label") || button.textContent || "").trim().slice(0, 40))
     .filter(Boolean);
   return Array.from(new Set(labels)).slice(0, 20);
+}
+
+/**
+ * Browser context: paste formatted text into the focused compose box, the way a person pasting from
+ * a document does. Teams renders pasted HTML (bold, lists, links) but shows typed markdown literally.
+ */
+export function pasteChatHtml({ html, plain }: { html: string; plain: string }): void {
+  const target = document.activeElement;
+  if (!target) return;
+  const data = new DataTransfer();
+  data.setData("text/html", html);
+  data.setData("text/plain", plain);
+  target.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+}
+
+/** Browser context: whether the compose box holds any text - i.e. whether a paste was taken. */
+export function composeHasText({ selectors }: { selectors: string[] }): boolean {
+  for (const selector of selectors) {
+    let box: Element | null = null;
+    try {
+      box = document.querySelector(selector);
+    } catch {
+      continue;
+    }
+    if (box && (box.textContent || "").trim()) return true;
+  }
+  return false;
 }
 
 async function chatUnavailableDetail(page: ChatPage): Promise<string> {
@@ -169,7 +198,8 @@ export async function sendTeamsChatMessage(
 ): Promise<TeamsChatSendResult> {
   const chatPage = page as ChatPage;
   const { renderTimeoutMs = 10000, pollMs = 250 } = options;
-  const lines = text.split(/\r?\n/);
+  const rendered = renderChatText(text);
+  const lines = rendered.plain.split(/\r?\n/);
   const needle = lines.find((line) => line.trim())?.trim();
   if (!needle) return { ok: false, reason: "error", detail: "empty message" };
 
@@ -180,22 +210,35 @@ export async function sendTeamsChatMessage(
     openedPane = opened.openedPane;
     const typedAt = Date.now();
 
-    // One line at a time: Enter sends in Teams, Shift+Enter is the line break.
     await opened.input.locator.click();
-    for (const [index, line] of lines.entries()) {
-      if (line) await chatPage.keyboard.insertText(line);
-      if (index < lines.length - 1) await chatPage.keyboard.press("Shift+Enter");
+    let format: "html" | "plain" = "plain";
+    if (rendered.formatted) {
+      await chatPage.evaluate(pasteChatHtml, { html: rendered.html, plain: rendered.plain });
+      const taken = await waitFor(
+        () => chatPage.evaluate(composeHasText, { selectors: teamsChatInputSelectors }),
+        1500,
+        pollMs,
+        chatPage,
+      );
+      if (taken) format = "html";
+    }
+    if (format === "plain") {
+      // One line at a time: Enter sends in Teams, Shift+Enter is the line break.
+      for (const [index, line] of lines.entries()) {
+        if (line) await chatPage.keyboard.insertText(line);
+        if (index < lines.length - 1) await chatPage.keyboard.press("Shift+Enter");
+      }
     }
     await chatPage.keyboard.press("Enter");
 
-    const rendered = await waitFor(
+    const delivered = await waitFor(
       () => chatPage.evaluate(chatMessageRendered, { needle, selectors: teamsChatMessageSelectors }),
       renderTimeoutMs,
       pollMs,
       chatPage,
     );
-    if (!rendered) return { ok: false, reason: "not_rendered" };
-    return { ok: true, timings: { button_ms: opened.button_ms, input_ms: opened.input_ms, delivery_ms: Date.now() - typedAt } };
+    if (!delivered) return { ok: false, reason: "not_rendered" };
+    return { ok: true, format, timings: { button_ms: opened.button_ms, input_ms: opened.input_ms, delivery_ms: Date.now() - typedAt } };
   } catch (e: any) {
     return { ok: false, reason: "error", detail: String(e?.message || e).slice(0, 200) };
   } finally {
