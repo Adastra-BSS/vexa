@@ -345,7 +345,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // Teams chat feeds the commands and nothing else - never the transcript. Jitsi chat is still
     // published as transcript `chat` segments.
     const onChat = inv.platform === 'teams'
-      ? (sender: string, text: string): void => { void commands?.handle({ sender, text }); }
+      ? (sender: string, text: string, sentAt?: string): void => { void commands?.handle({ sender, text, sentAt }); }
       : publishChat;
     // #593: a post-admission subsystem failure must NEVER self-evict. createLivePipeline wraps the
     // page-side capture + recording attach + the engine start so pipeline.start() ALWAYS RESOLVES;

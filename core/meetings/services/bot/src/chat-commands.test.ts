@@ -25,7 +25,7 @@ function harness(over: Partial<Parameters<typeof createChatCommands>[0]> = {}) {
   const commands = createChatCommands({
     texts: TEXTS,
     botName: BOT,
-    send: async (text) => { sent.push(text); actions.push(`send:${text}`); return { ok: true }; },
+    send: async (text) => { sent.push(text); actions.push(`send:${text}`); return { ok: true, timings: { button_ms: 0, input_ms: 0, delivery_ms: 40 } }; },
     onLeave: () => { actions.push('leave'); },
     onDiscard: () => { actions.push('discard'); },
     emit: (event, fields = {}) => { events.push({ event, fields }); },
@@ -62,8 +62,19 @@ async function main() {
     advance(25_000);
     await commands.handle({ sender: 'Tom Hill', text: 'Attend: help' });
     check('help after 30 s replies again', sent.length === 2, JSON.stringify(sent));
+    check('a reply that landed is reported with its timings',
+      events.some((e) => e.event === 'chat_reply_posted' && e.fields.command === 'help' && e.fields.delivery_ms === 40), JSON.stringify(events));
     check('each help is one chat_command event with the command name only',
       events.filter((e) => e.event === 'chat_command').length === 3 && !JSON.stringify(events).includes('Priya'), JSON.stringify(events));
+  }
+
+  console.log('\n=== how late the bot saw it ===');
+  {
+    const { commands, events, advance } = harness();
+    advance(Date.parse('2026-10-23T07:56:31.000Z'));
+    await commands.handle({ sender: 'Priya Nair', text: 'attend help', sentAt: '2026-10-23T07:56:29.500Z' });
+    check('chat_command carries how old the message was when the bot saw it',
+      events.some((e) => e.event === 'chat_command' && e.fields.age_ms === 1500), JSON.stringify(events));
   }
 
   console.log('\n=== the bot never obeys itself ===');

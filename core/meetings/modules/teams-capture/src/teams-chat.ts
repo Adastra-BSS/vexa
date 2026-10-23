@@ -12,7 +12,7 @@
  * structural dump so selectors can be tuned from live telemetry.
  */
 
-export interface TeamsChatMessage { sender: string; text: string }
+export interface TeamsChatMessage { sender: string; text: string; sentAt?: string }
 
 export interface TeamsChatOptions {
   log?: (m: string) => void;
@@ -125,7 +125,8 @@ export function createTeamsChat(opts: TeamsChatOptions): TeamsChat {
     // Strip a trailing timestamp Teams appends to the sender row ("Name 10:42 AM").
     sender = sender.replace(/\s*\d{1,2}:\d{2}\s*(AM|PM)?\s*$/i, '').trim() || 'Unknown';
     if (!text) return null;
-    return { sender, text };
+    const sentAt = node.querySelector('time[datetime]')?.getAttribute('datetime') || undefined;
+    return sentAt ? { sender, text, sentAt } : { sender, text };
   };
 
   // Structural dump of one message node so selectors can be tuned against the

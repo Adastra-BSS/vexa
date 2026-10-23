@@ -15,7 +15,7 @@ import { joinMicrosoftTeams } from "./msteams/join";
 import { waitForTeamsMeetingAdmission, checkForTeamsAdmissionSilent } from "./msteams/admission";
 import { prepareForRecording as prepareForTeamsRecording, leaveMicrosoftTeams } from "./msteams/leave";
 import { startTeamsRemovalMonitor, type TeamsRemovalKind } from "./msteams/removal";
-import { openTeamsChatPane, sendTeamsChatMessage, type TeamsChatFailure, type TeamsChatOpenResult, type TeamsChatSendResult } from "./msteams/chat";
+import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, openTeamsChatPane, sendTeamsChatMessage, type TeamsChatFailure, type TeamsChatOpenResult, type TeamsChatSendResult } from "./msteams/chat";
 import { joinZoomMeeting, buildZoomWebClientUrl } from "./zoom/join";
 import { waitForZoomMeetingAdmission, checkForZoomAdmissionSilent } from "./zoom/admission";
 import { leaveZoomMeeting, dismissZoomPopups } from "./zoom/leave";
@@ -35,7 +35,7 @@ export { startDebugView, setHooks };
 export { JOIN_BROWSER_ARGS, getJoinBrowserArgs };
 // Post into the Teams meeting chat once seated (the bot's join notice).
 // ...and keep the chat pane open for the bot's chat commands.
-export { openTeamsChatPane, sendTeamsChatMessage };
+export { TEAMS_CHAT_BUTTON_TIMEOUT_MS, openTeamsChatPane, sendTeamsChatMessage };
 export type { TeamsChatFailure, TeamsChatOpenResult, TeamsChatSendResult };
 // How a Teams stay ended: a participant removed the bot, or the call went away under it.
 export type { TeamsRemovalKind };

@@ -189,6 +189,17 @@ check('container selectors fall back to body', teamsMeetingContainerSelectors.in
   tick();
   check('listener: a re-rendered message is not reported twice', out.length === 2);
 
+  // Teams stamps each message with a <time datetime>; the listener passes it on so a slow
+  // reply can be told apart from a slow read.
+  const stamped = e('div', { 'data-tid': 'chat-pane-message' }, [
+    t('div', 'Tom Hill', { 'data-tid': 'message-author-name' }),
+    t('div', 'attend leave', { id: 'content-103' }),
+    t('time', '9:56', { datetime: '2026-10-23T07:56:29.500Z' }),
+  ]);
+  append(list, stamped);
+  tick();
+  check('listener: the message carries Teams\' own send time', (out[2] as any)?.sentAt === '2026-10-23T07:56:29.500Z');
+
   chat.destroy();
   g.window.setInterval = realInterval;
 }

@@ -25,6 +25,9 @@ export interface ChatCommandTexts {
 export interface ChatMessage {
   sender: string;
   text: string;
+  /** Teams' own send time, when the message carries one - so a slow read and a slow reply can be
+   *  told apart. */
+  sentAt?: string;
 }
 
 export interface ChatCommands {
@@ -83,6 +86,7 @@ export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | un
 
   const reply = async (command: ChatCommand, text: string): Promise<void> => {
     if (!text) return;
+    const startedAt = now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<NoticeSendResult>((resolve) => {
       timer = setTimeout(() => resolve({ ok: false, reason: 'timeout' }), replyTimeoutMs);
@@ -95,19 +99,22 @@ export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | un
     } finally {
       clearTimeout(timer);
     }
-    if (!result.ok) emit('chat_reply_failed', { meeting_id: meetingId, command, reason: result.reason });
+    if (result.ok) emit('chat_reply_posted', { meeting_id: meetingId, command, duration_ms: now() - startedAt, ...(result.timings ?? {}) });
+    else emit('chat_reply_failed', { meeting_id: meetingId, command, reason: result.reason });
   };
 
   return {
-    async handle({ sender, text }) {
+    async handle({ sender, text, sentAt }) {
       if (ended || (self && sender.trim().toLowerCase().startsWith(self))) return;
       const command = parseChatCommand(text);
       if (!command) return;
+      const sent = sentAt ? Date.parse(sentAt) : Number.NaN;
+      const age = Number.isFinite(sent) ? { age_ms: Math.max(0, now() - sent) } : {};
 
       if (command === 'help') {
         const at = now();
         const limited = lastHelpAt !== null && at - lastHelpAt < helpIntervalMs;
-        emit('chat_command', { meeting_id: meetingId, command, ...(limited ? { rate_limited: true } : {}) });
+        emit('chat_command', { meeting_id: meetingId, command, ...age, ...(limited ? { rate_limited: true } : {}) });
         if (limited) return;
         lastHelpAt = at;
         await reply(command, texts.help);
@@ -116,7 +123,7 @@ export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | un
 
       // Leave and discard end the bot's stay: one of them wins, and nothing after it is obeyed.
       ended = true;
-      emit('chat_command', { meeting_id: meetingId, command });
+      emit('chat_command', { meeting_id: meetingId, command, ...age });
       await reply(command, command === 'leave' ? texts.leaveAck : texts.discardAck);
       if (command === 'leave') onLeave();
       else onDiscard();

@@ -699,7 +699,7 @@ export async function startCaptureBridge(
   telemetry?: TelemetrySink,
   /** In-meeting chat sink (jitsi lane) — each captured chat message crosses here;
    *  the composition root publishes it as a transcript.v1 `source:'chat'` segment. */
-  onChat?: (sender: string, text: string) => void,
+  onChat?: (sender: string, text: string, sentAt?: string) => void,
   /** Active-phase silence signal. It remains unavailable until page capture reports ready. */
   activity?: RemoteAudioActivityTap,
   /** Who-spoke-when, kept for the post-call transcription that names diarized voices from it. */
@@ -792,8 +792,8 @@ export async function startCaptureBridge(
     if (!String(e.message).includes('already registered')) throw e;
   });
   // jitsi chat → the embedder's sink (a transcript.v1 `chat` segment at the composition root).
-  await page.exposeFunction('__vexaChatMessage', (sender: string, text: string): void => {
-    try { onChat?.(sender, text); } catch (e) { console.error(`[bot] chat sink rejected: ${String(e)}`); }
+  await page.exposeFunction('__vexaChatMessage', (sender: string, text: string, sentAt?: string): void => {
+    try { onChat?.(sender, text, sentAt); } catch (e) { console.error(`[bot] chat sink rejected: ${String(e)}`); }
   }).catch(() => { /* optional */ });
 
   // ── Start the page-side capture (VexaBrowserUtils preferred; production inline fallback). ──
@@ -1046,7 +1046,7 @@ export async function startCaptureBridge(
         if (listenTeamsChat && w.VexaBrowserUtils?.createTeamsChat && !w.__vexaTeamsChat) {
           w.__vexaTeamsChat = w.VexaBrowserUtils.createTeamsChat({
             skipExisting: true,
-            onMessage: (m: { sender: string; text: string }) => w.__vexaChatMessage?.(m.sender, m.text),
+            onMessage: (m: { sender: string; text: string; sentAt?: string }) => w.__vexaChatMessage?.(m.sender, m.text, m.sentAt),
           });
         }
       }
