@@ -31,6 +31,8 @@ export interface RemoteAudioActivitySnapshot {
   roomEmptySince?: number;
   /** Somebody has been in the room at some point. Until then the meeting may just be starting late. */
   roomEverOccupied?: boolean;
+  /** When remote audio last actually arrived (not capture becoming ready); undefined until it has. */
+  lastHeardAt?: number;
 }
 
 /** One roster report from the page. All counts exclude the bot itself. */
@@ -89,6 +91,7 @@ export function createRemoteAudioActivityTap(options: {
   const now = options.now ?? Date.now;
   const energyFloor = options.energyFloor ?? REMOTE_AUDIO_ENERGY_FLOOR;
   let state: { available: boolean; lastRemoteAudioAt?: number } = { available: false };
+  let lastHeardAt: number | undefined;
   // Kept apart from the audio state: the roster comes from the page's participant scan, not from
   // audio capture, so capture readiness changing must not forget who is in the room.
   let roster: { roomEmpty?: boolean; roomEmptySince?: number; roomEverOccupied?: boolean } = {};
@@ -101,6 +104,7 @@ export function createRemoteAudioActivityTap(options: {
       // Digital silence (or a nonsense reading) is not presence; every other delivered frame is.
       if (!state.available || !Number.isFinite(energy) || energy <= 0 || energy < energyFloor) return;
       state = { available: true, lastRemoteAudioAt: now() };
+      lastHeardAt = state.lastRemoteAudioAt;
     },
     unavailable(): void {
       state = { available: false };
@@ -114,19 +118,23 @@ export function createRemoteAudioActivityTap(options: {
       roster = { roomEmpty: true, roomEmptySince: now(), roomEverOccupied: roster.roomEverOccupied ?? false };
     },
     snapshot(): RemoteAudioActivitySnapshot {
-      return { ...state, ...roster };
+      return { ...state, ...roster, lastHeardAt };
     },
   };
 }
 
 /** A room empty for the window, after somebody had been in it, means everyone left. No roster
- *  report at all means the platform or page cannot count, which is not evidence of an empty room. */
+ *  report at all means the platform or page cannot count, which is not evidence of an empty room.
+ *  Neither is a roster that reads empty while the bot still hears someone: the scan can lose the
+ *  participant tiles when Teams re-lays out the stage (the chat pane opening), so the room must also
+ *  have been silent for the window. */
 function emptyRoomFor(snapshot: RemoteAudioActivitySnapshot, now: number, emptyRoomMs: number): boolean {
   return emptyRoomMs > 0
     && snapshot.roomEverOccupied === true
     && snapshot.roomEmpty === true
     && snapshot.roomEmptySince !== undefined
-    && now - snapshot.roomEmptySince >= emptyRoomMs;
+    && now - snapshot.roomEmptySince >= emptyRoomMs
+    && (snapshot.lastHeardAt === undefined || now - snapshot.lastHeardAt >= emptyRoomMs);
 }
 
 export const silenceAlonenessAdapter: AlonenessAdapter = {
