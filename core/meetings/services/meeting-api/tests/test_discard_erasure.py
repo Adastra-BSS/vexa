@@ -27,7 +27,8 @@ RECORDING = {"id": 501, "user_id": USER, "session_uid": "sess-uid"}
 PREFIX = f"recordings/{USER}/501/sess-uid/"
 
 JOINING = {"connection_id": "sess-uid", "container_id": "mtg-1-bot", "status": "joining"}
-ACTIVE = {"connection_id": "sess-uid", "status": "active"}
+# The bot stamps when it saw each transition; provenance trusts only that producer time.
+ACTIVE = {"connection_id": "sess-uid", "status": "active", "timestamp": "2026-10-22T11:50:00.000Z"}
 
 
 @pytest.fixture
@@ -44,13 +45,22 @@ async def _app(redis_c):
 
     store = InMemoryTranscriptStore(redis_client=redis_c)
     store.seed_meeting(user_id=USER, platform="teams", native_meeting_id=NATIVE, meeting_id=1)
-    store._meetings[1]["data"] = {"recordings": [dict(RECORDING)], "speaker_events": [{"name": "P"}]}
+    # A spawned bot freezes its transcription provider on the row, which makes the terminal callback
+    # write the meeting's service provenance after the erasure.
+    store._meetings[1]["data"] = {"recordings": [dict(RECORDING)], "speaker_events": [{"name": "P"}],
+                                  "transcription_provider": "none"}
     await store.append_segment(1, {"segment_id": "s1", "start": 1.0, "end": 2.0, "text": "secret words",
                                    "language": "en", "speaker": "P", "completed": True,
                                    "updated_at": datetime.now(timezone.utc).isoformat()})
     repo = InMemoryMeetingRepo()
     meeting = await repo.create_meeting(user_id=USER, platform="teams", native_meeting_id=NATIVE, data={})
     assert meeting["id"] == 1
+    # In production the meeting repo and the transcript store read and write one database row, so a
+    # write from a stale copy of meeting.data after the erasure would bring the erased keys back.
+    row = repo._meetings[1]
+    row.update({k: v for k, v in store._meetings[1].items() if k not in row})
+    row["data"] = store._meetings[1]["data"]
+    store._meetings[1] = row
     await repo.create_session(meeting_id=1, session_uid="sess-uid")
     storage = InMemoryStorage()
     await storage.upload(PREFIX + "chunk-0.webm", b"audio", content_type="audio/webm")
@@ -82,6 +92,7 @@ async def test_a_discarded_meeting_is_erased(redis_c, trigger, reason):
     client, store, storage, finalized = await _app(redis_c)
     _end(client, store, {
         "connection_id": "sess-uid", "status": "completed", "exit_code": 0, "completion_reason": reason,
+        "timestamp": "2026-10-22T12:00:01.000Z",
         "discarded": {"at": "2026-10-22T12:00:00.000Z", "trigger": trigger},
     })
 
@@ -91,6 +102,7 @@ async def test_a_discarded_meeting_is_erased(redis_c, trigger, reason):
     data = store._meetings[1]["data"]
     assert "recordings" not in data and "speaker_events" not in data
     assert data["artifact_deletion"]["state"] == "completed"
+    assert "service_provenance" in data
     # The transcript feed is gone; what follows it is the lifecycle's copilot-reap control marker,
     # which carries no meeting content.
     feed = await redis_c.xrange("tc:meeting:1")

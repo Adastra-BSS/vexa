@@ -615,6 +615,12 @@ def _mount_lifecycle(
                 log_event("meeting_discard_erase_failed", audience="system", level="warning",
                           span="lifecycle.callback",
                           fields={"meeting_id": meeting_row["id"], "error": str(e)})
+            # meeting_row was read before the erasure: nothing below may carry the erased keys on.
+            from .collector.ports import ARTIFACT_DATA_KEYS
+
+            meeting_row = {**meeting_row, "data": {
+                k: v for k, v in (meeting_row.get("data") or {}).items() if k not in ARTIFACT_DATA_KEYS
+            }}
         if (
             transcript_finalizer is not None
             and terminal_advanced
@@ -667,6 +673,8 @@ def _mount_lifecycle(
                 # availability contract. The next reconciliation pass owns that exception.
                 projection_row = {**meeting_row, "data": data}
                 try:
+                    # Only the provenance key: the status write merges it into the row as it is now,
+                    # so a copy of meeting.data read earlier never overwrites what changed since.
                     updated_row = await meeting_repo.update_meeting_status(
                         session_uid=rec.connection_id,
                         status=rec.status.value,
@@ -674,7 +682,7 @@ def _mount_lifecycle(
                             rec.completion_reason.value if rec.completion_reason else None
                         ),
                         failure_stage=rec.failure_stage.value if rec.failure_stage else None,
-                        data=data,
+                        data={"service_provenance": provenance},
                     )
                     meeting_row = (
                         updated_row if isinstance(updated_row, dict) else projection_row
