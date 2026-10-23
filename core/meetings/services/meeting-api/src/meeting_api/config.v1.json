@@ -293,11 +293,21 @@
    "class": "capability",
    "capability": "azure_object_storage",
    "secret": true,
-   "description": "Azure Blob account connection string (AccountName + AccountKey, or a SAS) recordings are written to when STORAGE_BACKEND=azure; boot refuses, naming this key, when the backend is azure and it is unset",
+   "description": "one of two ways to reach the Azure Blob account recordings are written to when STORAGE_BACKEND=azure: a connection string (AccountName + AccountKey, or a SAS). Wins over AZURE_STORAGE_ACCOUNT_URL when both are set; boot refuses, naming both keys, when the backend is azure and neither is set",
    "targets": [
     "compose",
     "helm",
     "lite"
+   ]
+  },
+  {
+   "key": "AZURE_STORAGE_ACCOUNT_URL",
+   "class": "capability",
+   "capability": "azure_object_storage",
+   "secret": false,
+   "description": "the other way to reach the Azure Blob account when STORAGE_BACKEND=azure: its blob endpoint (https://<account>.blob.core.windows.net), authenticated with DefaultAzureCredential (AKS workload identity) so the account can run with shared-key access disabled. Used only when AZURE_STORAGE_CONNECTION_STRING is unset",
+   "targets": [
+    "helm"
    ]
   },
   {
@@ -702,8 +712,8 @@
   },
   "azure_object_storage": {
    "description": "recordings persist to Azure Blob Storage instead of the S3-compatible store (STORAGE_BACKEND=azure)",
-   "mode": "all",
-   "when_unconfigured": "with STORAGE_BACKEND=azure the storage factory raises at BOOT naming AZURE_STORAGE_CONNECTION_STRING — the deployment refuses to start rather than accept recordings it cannot persist; under the default STORAGE_BACKEND=minio the capability is simply unused"
+   "mode": "any",
+   "when_unconfigured": "with STORAGE_BACKEND=azure the storage factory raises at BOOT naming AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_ACCOUNT_URL (either one suffices) - the deployment refuses to start rather than accept recordings it cannot persist; under the default STORAGE_BACKEND=minio the capability is simply unused"
   }
  }
 }

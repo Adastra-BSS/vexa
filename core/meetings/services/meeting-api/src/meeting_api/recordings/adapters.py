@@ -8,7 +8,7 @@ Thin translations of the ports to the concrete clients, as the parent's
 every entry point (``__main__`` and ``build_production_router``) goes through it, so a deployment's
 storage cannot depend on which entry point booted it.
 
-Heavy imports (boto3, azure-storage-blob, SQLAlchemy) are LAZY (inside the methods / the builders) so
+Heavy imports (boto3, azure-storage-blob, azure-identity, SQLAlchemy) are LAZY (inside the methods / the builders) so
 the package imports + unit-tests with the in-memory fakes without those runtime deps in the gate venv
 — which is why ``pyproject.toml`` needs no extra pins. It also means a MinIO deployment never has to
 install the azure SDK, and vice versa: the factory RESOLVES a backend without constructing a client.
@@ -140,6 +140,9 @@ class AzureBlobStorage:
     """``Storage`` over an Azure Blob container. Lazy client so the package imports without
     azure-storage-blob (a MinIO deployment never installs it).
 
+    Authenticates with EITHER a connection string (shared key) OR an account URL (Entra, via
+    ``DefaultAzureCredential``) - exactly one; see ``blob_service_client``.
+
     The SYNCHRONOUS SDK, offloaded through the same ``_run`` seam as ``S3Storage`` — not the ``.aio``
     variant. The sync client keeps ONE thread-offload story for both backends (so ``_c()`` stays
     stubbable in a plain unit test), needs no aiohttp, and has no async close to thread through the
@@ -152,17 +155,19 @@ class AzureBlobStorage:
     loop the offload exists to protect.
     """
 
-    def __init__(self, *, container: str, connection_string: str):
+    def __init__(self, *, container: str, connection_string: Optional[str] = None,
+                 account_url: Optional[str] = None):
+        if bool(connection_string) == bool(account_url):
+            raise ValueError("AzureBlobStorage needs exactly one of connection_string or account_url")
         self._container = container
         self._conn = connection_string
+        self._account_url = account_url
         self._client = None
 
     def _c(self):
         if self._client is None:
-            from azure.storage.blob import BlobServiceClient
-
-            self._client = BlobServiceClient.from_connection_string(
-                self._conn
+            self._client = blob_service_client(
+                connection_string=self._conn, account_url=self._account_url,
             ).get_container_client(self._container)
         return self._client
 
@@ -273,6 +278,38 @@ def _minio_endpoint_url() -> str:
     return f"{scheme}://{endpoint}"
 
 
+def blob_service_client(*, connection_string: Optional[str] = None, account_url: Optional[str] = None):
+    """A ``BlobServiceClient`` from a connection string (shared-key auth) or an account URL
+    (Entra auth). The account-URL path uses ``DefaultAzureCredential``, which picks up the
+    AKS workload identity env (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE) the
+    webhook injects - so a storage account with shared-key access disabled is reachable without
+    any secret in the pod."""
+    from azure.storage.blob import BlobServiceClient
+
+    if connection_string:
+        return BlobServiceClient.from_connection_string(connection_string)
+    from azure.identity import DefaultAzureCredential
+
+    return BlobServiceClient(account_url, credential=DefaultAzureCredential())
+
+
+def azure_auth_from_env() -> dict:
+    """Resolve how to authenticate to Azure Blob: ``AZURE_STORAGE_CONNECTION_STRING`` wins when set
+    (compose, lite, and a rollback keep working unchanged), else ``AZURE_STORAGE_ACCOUNT_URL`` with
+    a managed identity. Neither set raises naming BOTH keys. Blank counts as unset - compose's
+    ``${VAR:-}`` sets an empty string, not an absent var."""
+    conn = (os.getenv("AZURE_STORAGE_CONNECTION_STRING") or "").strip()
+    if conn:
+        return {"connection_string": conn}
+    url = (os.getenv("AZURE_STORAGE_ACCOUNT_URL") or "").strip()
+    if url:
+        return {"account_url": url}
+    raise RuntimeError(
+        "STORAGE_BACKEND=azure requires AZURE_STORAGE_CONNECTION_STRING or "
+        "AZURE_STORAGE_ACCOUNT_URL (both unset or empty)"
+    )
+
+
 def build_storage_from_env():
     """The ONE place a recordings ``Storage`` backend is chosen — ``STORAGE_BACKEND`` selects it.
 
@@ -282,19 +319,14 @@ def build_storage_from_env():
 
     Unset means ``minio``, with the endpoint/bucket/credential fallback chains 0.11 shipped — so an
     operator rolling back to the previous image with unchanged env keeps a working deployment. A
-    configured-but-unsatisfiable backend raises HERE, at boot, naming the missing key; the
+    configured-but-unsatisfiable backend raises HERE, at boot, naming the missing key(s); the
     alternative is a service that starts clean and then 500s the first chunk upload of every meeting.
     """
     backend = (os.getenv("STORAGE_BACKEND") or "minio").strip().lower()
     if backend == "azure":
-        conn = (os.getenv("AZURE_STORAGE_CONNECTION_STRING") or "").strip()
-        if not conn:
-            raise RuntimeError(
-                "STORAGE_BACKEND=azure requires AZURE_STORAGE_CONNECTION_STRING (unset or empty)"
-            )
         return AzureBlobStorage(
             container=os.getenv("AZURE_STORAGE_CONTAINER") or "vexa",
-            connection_string=conn,
+            **azure_auth_from_env(),
         )
     if backend != "minio":
         raise RuntimeError(f"unknown STORAGE_BACKEND {backend!r} — expected 'minio' or 'azure'")

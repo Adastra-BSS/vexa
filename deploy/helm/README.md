@@ -50,11 +50,15 @@ Docker to build the images. It proves the control plane stands up and `/health` 
 |---|---|---|
 | `global.imageTag` | `""` | Set to a pinned `YYMMDD-HHMM` tag — overrides every service tag (build-once). |
 | `runtime.backend` | `k8s` | `k8s` spawns Pods via RBAC (real cloud); `docker` mounts the host socket (single-node only); `process` runs child processes. |
-| `secrets.*` | placeholders | `adminApiToken`, `internalApiSecret`, `transcriptionServiceToken`, `dispatchSigningKey`, `nextauthSecret`, `anthropic*`. Or set `secrets.existingSecretName` (must carry `ADMIN_API_TOKEN`, `INTERNAL_API_SECRET`, `TRANSCRIPTION_SERVICE_TOKEN`, `VEXA_DISPATCH_SIGNING_KEY`, `NEXTAUTH_SECRET`). |
+| `secrets.*` | placeholders | `adminApiToken`, `internalApiSecret`, `transcriptionServiceToken`, `dispatchSigningKey`, `nextauthSecret`, `anthropic*`. Or set `secrets.existingSecretName` (must carry `ADMIN_API_TOKEN`, `INTERNAL_API_SECRET`, `VEXA_DISPATCH_SIGNING_KEY`, `NEXTAUTH_SECRET`; `TRANSCRIPTION_SERVICE_TOKEN` is optional, for deployments without in-call transcription). |
 | `postgres.enabled` / `redis.enabled` / `minio.enabled` | `true` | Flip to `false` to use managed backing; then set `database.*` / `redisConfig.*` and a pre-existing `postgres.credentialsSecretName`. |
 | `pgbouncer.enabled` | `false` | Transaction pooler for managed Postgres with a fixed slot budget. |
 | `terminal.enabled` | `true` | The web UI. Set `terminal.publicUrl` (NEXTAUTH_URL/TERMINAL_URL) when fronted by ingress; add OAuth via `terminal.extraEnv`. |
 | `ingress.enabled` | `false` | Fronts the **terminal** by default; set `host`/`className`/`tls`. Add a second path to `gateway` to also expose the raw API. |
+| `meetingApi.storageBackend` | `minio` | `azure` writes recordings to Azure Blob (container `meetingApi.azureStorageContainer`, default `vexa`) and stops rendering MinIO. Authenticate with `secrets.azureStorageConnectionString` or `meetingApi.azureStorageAccountUrl`. |
+| `meetingApi.azureStorageAccountUrl` | `""` | Keyless Azure Blob: `https://<account>.blob.core.windows.net`, authenticated with `DefaultAzureCredential` (workload identity), so the account can disable shared-key access. The connection string wins when both are set. |
+| `meetingApi.serviceAccount.create` / `.name` / `.annotations` | `false` / `""` / `{}` | ServiceAccount the meeting-api Pod runs as (`name` empty = namespace default). For workload identity: `create: true`, a `name`, and the `azure.workload.identity/client-id` annotation. |
+| `meetingApi.podLabels` | `{}` | Extra Pod template labels (not the selector), e.g. `azure.workload.identity/use: "true"`. |
 | `minio.service.type` | `ClusterIP` | `NodePort` to reach presigned download URLs browser-side on dev clusters. |
 
 ## Known boundaries (v0.12)

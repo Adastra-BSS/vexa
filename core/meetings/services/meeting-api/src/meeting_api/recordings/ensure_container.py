@@ -23,12 +23,21 @@ import os
 import sys
 
 
-def ensure_azure(*, connection_string: str, container: str) -> bool:
-    """Create the Blob container. Returns True if it was created, False if it already existed."""
-    from azure.core.exceptions import ResourceExistsError
-    from azure.storage.blob import BlobServiceClient
+def ensure_azure(*, container: str, connection_string: str | None = None,
+                 account_url: str | None = None) -> bool:
+    """Create the Blob container. Returns True if it was created, False if it already existed.
 
-    client = BlobServiceClient.from_connection_string(connection_string).get_container_client(container)
+    Authenticates the same two ways the adapter does (connection string, else account URL with a
+    managed identity). With an account URL the identity needs a data-plane role that may create
+    containers (Storage Blob Data Contributor) - a container-scoped grant cannot create its own
+    container, so such a deployment pre-provisions it and this step then reports already-present."""
+    from azure.core.exceptions import ResourceExistsError
+
+    from .adapters import blob_service_client
+
+    client = blob_service_client(
+        connection_string=connection_string, account_url=account_url,
+    ).get_container_client(container)
     created = True
     try:
         client.create_container()
@@ -66,17 +75,17 @@ def ensure_minio(*, bucket: str, endpoint_url: str | None,
 
 def main(argv: list[str] | None = None) -> int:
     """Resolve the backend from the same env the adapters read, and ensure its container exists."""
-    from .adapters import _minio_endpoint_url
+    from .adapters import _minio_endpoint_url, azure_auth_from_env
 
     backend = (os.getenv("STORAGE_BACKEND") or "minio").strip().lower()
     if backend == "azure":
-        conn = (os.getenv("AZURE_STORAGE_CONNECTION_STRING") or "").strip()
-        if not conn:
-            print("STORAGE_BACKEND=azure requires AZURE_STORAGE_CONNECTION_STRING (unset or empty)",
-                  file=sys.stderr)
+        try:
+            auth = azure_auth_from_env()
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
             return 2
         name = os.getenv("AZURE_STORAGE_CONTAINER") or "vexa"
-        created = ensure_azure(connection_string=conn, container=name)
+        created = ensure_azure(container=name, **auth)
     elif backend == "minio":
         name = os.getenv("MINIO_BUCKET", os.getenv("RECORDING_BUCKET", "vexa"))
         created = ensure_minio(

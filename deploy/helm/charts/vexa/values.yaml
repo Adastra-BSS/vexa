@@ -209,10 +209,26 @@ meetingApi:
   # Where recordings are written. "minio" (default) uses the in-cluster store this chart deploys;
   # "azure" writes to an Azure Blob container instead, and the chart then stops rendering MinIO at
   # all (StatefulSet, Service, PVC and init Job) without you touching minio.enabled. Set the
-  # matching secrets.azureStorageConnectionString — meeting-api refuses to boot on azure without
-  # one. The container must already exist; the adapter never creates it.
+  # matching secrets.azureStorageConnectionString, or azureStorageAccountUrl below - meeting-api
+  # refuses to boot on azure with neither. The container must already exist; the adapter never
+  # creates it.
   storageBackend: "minio"
+  # Keyless Azure Blob: the account's blob endpoint (https://<account>.blob.core.windows.net),
+  # authenticated with DefaultAzureCredential, so the account can run with shared-key access
+  # disabled. Pair it with workload identity: serviceAccount below carrying the
+  # azure.workload.identity/client-id annotation, and podLabels carrying
+  # azure.workload.identity/use: "true". Ignored when the connection string is also set.
+  azureStorageAccountUrl: ""
   azureStorageContainer: "vexa"
+  # Extra labels on the meeting-api Pod template (not the selector), e.g.
+  # azure.workload.identity/use: "true" to have the AKS webhook inject the federated token.
+  podLabels: {}
+  # ServiceAccount the meeting-api Pod runs as. name empty = the namespace default. create renders
+  # it from this chart; annotations carry e.g. azure.workload.identity/client-id: <UAMI client id>.
+  serviceAccount:
+    create: false
+    name: ""
+    annotations: {}
   logLevel: "info"
   resources:
     requests: { cpu: 200m, memory: 512Mi }

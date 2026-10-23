@@ -27,11 +27,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Production-only runtime deps NOT in the (lean) test pyproject (redis/httpx are already pinned):
 # the ASGI server + the async Postgres stack (collector/bot_spawn/recordings SQLAlchemy adapters)
-# + boto3 and azure-storage-blob (the two recordings storage adapters). BOTH ship: STORAGE_BACKEND
-# picks one at boot, so moving a deployment between MinIO and Azure Blob is an env change, not a new
-# image — and the rollback is the same env change back.
+# + boto3 and azure-storage-blob (the two recordings storage adapters), plus azure-identity for Azure
+# Blob over a managed identity (AZURE_STORAGE_ACCOUNT_URL) instead of a shared-key connection string.
+# BOTH backends ship: STORAGE_BACKEND picks one at boot, so moving a deployment between MinIO and
+# Azure Blob is an env change, not a new image - and the rollback is the same env change back.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install "uvicorn[standard]==0.34.0" "sqlalchemy[asyncio]==2.0.36" "asyncpg==0.30.0" "boto3==1.35.0" "azure-storage-blob==12.30.0"
+    uv pip install "uvicorn[standard]==0.34.0" "sqlalchemy[asyncio]==2.0.36" "asyncpg==0.30.0" "boto3==1.35.0" "azure-storage-blob==12.30.0" "azure-identity==1.25.1"
 
 # The shipped source (src/ on PYTHONPATH).
 COPY core/meetings/services/meeting-api/src ./src
