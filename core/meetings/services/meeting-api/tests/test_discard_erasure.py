@@ -11,12 +11,14 @@ A meeting that ended any other way is untouched: finalized as before, nothing er
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import fakeredis.aioredis
 import pytest
 from fastapi.testclient import TestClient
 
+from meeting_api.collector.adapters import RedisStreamBus
 from meeting_api.collector.fakes import InMemoryTranscriptStore
 
 USER = 7
@@ -61,8 +63,9 @@ async def _app(redis_c):
         finalized.append(meeting_id)
         return 0
 
+    # The production wiring: the app gets the stream bus over the redis client, never the client.
     client = TestClient(create_app(transcript_store=store, meeting_repo=repo, storage=storage,
-                                   redis=redis_c, transcript_finalizer=finalizer))
+                                   redis=RedisStreamBus(redis_c), transcript_finalizer=finalizer))
     return client, store, storage, finalized
 
 
@@ -91,7 +94,7 @@ async def test_a_discarded_meeting_is_erased(redis_c, trigger, reason):
     # The transcript feed is gone; what follows it is the lifecycle's copilot-reap control marker,
     # which carries no meeting content.
     feed = await redis_c.xrange("tc:meeting:1")
-    assert [entry for _, entry in feed if entry.get(b"type") != b"session_end"] == []
+    assert [json.loads(entry[b"payload"])["type"] for _, entry in feed] == ["session_end"]
     assert finalized == []
 
 

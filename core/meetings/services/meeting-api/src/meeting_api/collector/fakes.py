@@ -674,6 +674,9 @@ class FakeRedisBus:
         field is ``payload`` (the parent's stream field name)."""
         return await self._client.xadd(stream, {"payload": json.dumps(payload)})
 
+    async def delete_stream(self, stream):
+        return await self._client.delete(stream)
+
     async def read_segments(self, *, group, consumer, stream, count=10):
         try:
             await self._client.xgroup_create(name=stream, groupname=group, id="0", mkstream=True)

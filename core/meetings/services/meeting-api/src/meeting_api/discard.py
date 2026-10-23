@@ -38,5 +38,5 @@ async def erase_discarded_meeting(
     if not finalized:
         raise RuntimeError(f"meeting {meeting_id} artifacts could not be finalized as deleted")
     if redis is not None:
-        await redis.delete(f"tc:meeting:{meeting_id}")
+        await redis.delete_stream(f"tc:meeting:{meeting_id}")
     return {"recordings": len(plan.get("recordings") or []), "objects": deleted_objects}
