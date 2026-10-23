@@ -17,9 +17,15 @@ spec:
       labels:
         {{- include "vexa.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: meeting-api
+        {{- with .Values.meetingApi.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         {{- toYaml .Values.global.podAnnotations | nindent 8 }}
     spec:
+      {{- with .Values.meetingApi.serviceAccount.name }}
+      serviceAccountName: {{ . }}
+      {{- end }}
       terminationGracePeriodSeconds: {{ .Values.meetingApi.terminationGracePeriodSeconds | default 30 }}
       securityContext:
         {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
@@ -89,11 +95,14 @@ spec:
               value: {{ .Values.meetingApi.defaultBotName | default "" | quote }}
             - name: TRANSCRIPTION_SERVICE_URL
               value: {{ .Values.meetingApi.transcriptionServiceUrl | default "" | quote }}
+            # optional: a deployment with in-call transcription off supplies no STT token, and an
+            # existingSecret need not carry the key.
             - name: TRANSCRIPTION_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "vexa.adminTokenSecretName" . }}
                   key: TRANSCRIPTION_SERVICE_TOKEN
+                  optional: true
             - name: VEXA_SERVICE_AUTHORITY_CONFIG
               value: {{ .Values.meetingApi.serviceAuthorityConfig | default "" | quote }}
             - name: VEXA_SERVICE_AUTHORITY_SECRET
@@ -141,6 +150,11 @@ spec:
                   name: {{ include "vexa.adminTokenSecretName" . }}
                   key: AZURE_STORAGE_CONNECTION_STRING
                   optional: true
+            # The keyless alternative to the connection string: the blob endpoint, authenticated
+            # with the pod's workload identity (see meetingApi.serviceAccount / podLabels). Not a
+            # secret. The connection string wins when both are set.
+            - name: AZURE_STORAGE_ACCOUNT_URL
+              value: {{ .Values.meetingApi.azureStorageAccountUrl | default "" | quote }}
             - name: AZURE_STORAGE_CONTAINER
               value: {{ .Values.meetingApi.azureStorageContainer | default "vexa" | quote }}
             - name: LOG_LEVEL

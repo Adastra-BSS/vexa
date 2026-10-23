@@ -62,12 +62,19 @@ def test_azure_object_storage_capability_is_declared_for_every_surface():
     all_surfaces = ["compose", "helm", "lite"]
 
     members = {k["key"] for k in decl["keys"] if k.get("capability") == "azure_object_storage"}
-    assert members == {"AZURE_STORAGE_CONNECTION_STRING"}, (
-        "the connection string alone decides the capability — the container has a working default"
+    assert members == {"AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_ACCOUNT_URL"}, (
+        "the two auth paths decide the capability - the container has a working default"
+    )
+    assert decl["capabilities"]["azure_object_storage"]["mode"] == "any", (
+        "either auth path suffices; mode=all would paint a connection-string deploy misconfigured"
     )
     conn = by_key["AZURE_STORAGE_CONNECTION_STRING"]
     assert conn["secret"] is True, "an account key is a credential (P14): never logged, never goldened"
     assert conn["targets"] == all_surfaces
+    # Workload identity exists only on the helm surface; compose and lite keep the connection string.
+    url = by_key["AZURE_STORAGE_ACCOUNT_URL"]
+    assert url["secret"] is False
+    assert url["targets"] == ["helm"]
 
     container = by_key["AZURE_STORAGE_CONTAINER"]
     assert container["class"] == "defaulted" and container["default"] == "vexa"
@@ -80,6 +87,15 @@ def test_azure_object_storage_capability_is_declared_for_every_surface():
         "the default must stay minio — that is what makes an image rollback with unchanged env safe"
     )
     assert backend["targets"] == all_surfaces
+
+
+def test_azure_object_storage_is_configured_by_either_auth_path():
+    conn = {"AZURE_STORAGE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=a"}
+    url = {"AZURE_STORAGE_ACCOUNT_URL": "https://a.blob.core.windows.net"}
+    assert cp.capability_states(conn)["azure_object_storage"] == cp.CONFIGURED
+    assert cp.capability_states(url)["azure_object_storage"] == cp.CONFIGURED
+    assert cp.capability_states({**conn, **url})["azure_object_storage"] == cp.CONFIGURED
+    assert cp.capability_states({})["azure_object_storage"] == cp.NOT_CONFIGURED
 
 
 def test_azure_object_storage_declares_no_probe():

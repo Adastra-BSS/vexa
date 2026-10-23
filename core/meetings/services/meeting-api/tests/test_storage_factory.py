@@ -27,8 +27,10 @@ _STORAGE_ENV = (
     "MINIO_BUCKET", "MINIO_ENDPOINT", "MINIO_SECURE", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY",
     "RECORDING_BUCKET",
     "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY",
-    "AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_CONTAINER",
+    "AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_ACCOUNT_URL", "AZURE_STORAGE_CONTAINER",
 )
+
+_AZURE_URL = "https://acct.blob.core.windows.net"
 
 _AZURE_CONN = (
     "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=a2V5;"
@@ -128,22 +130,56 @@ def test_azure_container_is_overridable(monkeypatch):
     assert build_storage_from_env()._container == "recordings"
 
 
-def test_azure_without_a_connection_string_refuses_by_name(monkeypatch):
-    """A half-configured azure deployment must fail at BOOT naming the missing key — not silently
+def test_azure_account_url_alone_resolves_managed_identity_mode(monkeypatch):
+    """No connection string, an account URL: the keyless path a shared-key-disabled account needs."""
+    monkeypatch.setenv("STORAGE_BACKEND", "azure")
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_URL", f"  {_AZURE_URL} ")
+    storage = build_storage_from_env()
+    assert isinstance(storage, AzureBlobStorage)
+    assert storage._account_url == _AZURE_URL
+    assert storage._conn is None
+    assert storage._client is None, "resolving the identity path must not construct a credential"
+
+
+def test_azure_connection_string_wins_over_account_url(monkeypatch):
+    """Both set ⇒ the connection string, so adding the URL to an existing deployment changes nothing
+    until the connection string is removed (the rollback is putting it back)."""
+    monkeypatch.setenv("STORAGE_BACKEND", "azure")
+    monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", _AZURE_CONN)
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_URL", _AZURE_URL)
+    storage = build_storage_from_env()
+    assert storage._conn == _AZURE_CONN
+    assert storage._account_url is None
+
+
+def test_azure_with_neither_refuses_naming_both_keys(monkeypatch):
+    """A half-configured azure deployment must fail at BOOT naming the missing keys - not silently
     fall back to a MinIO that is not deployed and 500 on the first chunk upload."""
     monkeypatch.setenv("STORAGE_BACKEND", "azure")
     with pytest.raises(RuntimeError) as ei:
         build_storage_from_env()
     assert "AZURE_STORAGE_CONNECTION_STRING" in str(ei.value)
+    assert "AZURE_STORAGE_ACCOUNT_URL" in str(ei.value)
 
 
-def test_azure_with_a_blank_connection_string_refuses(monkeypatch):
+def test_azure_with_blank_values_refuses(monkeypatch):
     """Compose's ``${VAR:-}`` sets an EMPTY string, not an absent var — empty must count as unset."""
     monkeypatch.setenv("STORAGE_BACKEND", "azure")
     monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", "   ")
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_URL", "")
     with pytest.raises(RuntimeError) as ei:
         build_storage_from_env()
     assert "AZURE_STORAGE_CONNECTION_STRING" in str(ei.value)
+    assert "AZURE_STORAGE_ACCOUNT_URL" in str(ei.value)
+
+
+@pytest.mark.parametrize("auth", [
+    {},
+    {"connection_string": _AZURE_CONN, "account_url": _AZURE_URL},
+])
+def test_azure_blob_storage_needs_exactly_one_auth_mode(auth):
+    with pytest.raises(ValueError):
+        AzureBlobStorage(container="vexa", **auth)
 
 
 def test_unknown_backend_refuses_and_names_both_valid_values(monkeypatch):
