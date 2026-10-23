@@ -1,7 +1,7 @@
 /**
  * The bot's chat commands: `attend help`, `attend leave`, `attend discard`, written by anyone in
- * the meeting chat. Asserts the parser's exact grammar, that the bot never obeys itself, that help
- * cannot be spammed, that leave and discard act once and in order (reply, then act), and that a
+ * the meeting chat. Asserts the parser's exact grammar, that the bot never obeys itself, that every
+ * help is answered, that leave and discard act once and in order (reply, then act), and that a
  * chat that will not take the reply never stops the leave or the discard.
  *
  * Run: npx tsx src/chat-commands.test.ts
@@ -56,12 +56,12 @@ async function main() {
     const { commands, sent, events, advance } = harness();
     await commands.handle({ sender: 'Priya Nair', text: 'attend help' });
     check('help replies with the help text', sent.length === 1 && sent[0] === 'HELP TEXT', JSON.stringify(sent));
-    advance(10_000);
+    advance(3_000);
     await commands.handle({ sender: 'Priya Nair', text: 'attend help' });
-    check('a second help within 30 s gets no second reply', sent.length === 1, JSON.stringify(sent));
-    advance(25_000);
+    check('a second help seconds later is answered too', sent.length === 2, JSON.stringify(sent));
     await commands.handle({ sender: 'Tom Hill', text: 'Attend: help' });
-    check('help after 30 s replies again', sent.length === 2, JSON.stringify(sent));
+    check('every help gets its reply', sent.length === 3, JSON.stringify(sent));
+    check('no help is ever marked rate limited', !JSON.stringify(events).includes('rate_limited'), JSON.stringify(events));
     check('a reply that landed is reported with its timings',
       events.some((e) => e.event === 'chat_reply_posted' && e.fields.command === 'help' && e.fields.delivery_ms === 40), JSON.stringify(events));
     check('each help is one chat_command event with the command name only',
@@ -107,6 +107,16 @@ async function main() {
     check('...and is reported', events.some((e) => e.event === 'chat_reply_failed' && e.fields.reason === 'timeout'), JSON.stringify(events));
   }
   {
+    const { commands, events } = harness({ send: async () => ({ ok: false, reason: 'not_rendered', detail: 'text left in the compose box' }) });
+    await commands.handle({ sender: 'Priya Nair', text: 'attend help' });
+    check('a failed reply says why', events.some((e) => e.event === 'chat_reply_failed' && e.fields.detail === 'text left in the compose box'), JSON.stringify(events));
+  }
+  {
+    const { commands, events } = harness({ send: async () => ({ ok: true, format: 'html', resent: true }) });
+    await commands.handle({ sender: 'Priya Nair', text: 'attend help' });
+    check('a reply that needed the Send button says so', events.some((e) => e.event === 'chat_reply_posted' && e.fields.resent === true && e.fields.format === 'html'), JSON.stringify(events));
+  }
+  {
     const { commands, actions } = harness({ texts: { ...TEXTS, leaveAck: '' } });
     await commands.handle({ sender: 'Priya Nair', text: 'attend leave' });
     check('an empty reply text leaves without posting', JSON.stringify(actions) === JSON.stringify(['leave']), JSON.stringify(actions));
@@ -141,7 +151,7 @@ async function main() {
   }
 
   if (failed) { console.error(`\nFAIL chat-commands: ${failed} check(s) FAILED.`); process.exit(1); }
-  console.log('\nPASS chat-commands: grammar, self filter, help limit, leave/discard order, bounded replies.');
+  console.log('\nPASS chat-commands: grammar, self filter, every help answered, leave/discard order, bounded replies.');
 }
 
 void main();

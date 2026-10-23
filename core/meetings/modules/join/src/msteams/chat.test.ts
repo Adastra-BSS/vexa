@@ -13,7 +13,7 @@
 
 import { JSDOM } from 'jsdom';
 import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, openTeamsChatPane, pasteChatHtml, sendTeamsChatMessage, type ChatPage } from './chat';
-import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors } from './selectors';
+import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors, teamsChatSendButtonSelectors } from './selectors';
 
 let passed = 0, failed = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -37,11 +37,16 @@ interface FakeOptions {
   enabledAfterWaits?: number;
   /** Whether the compose box takes a pasted HTML message (Teams renders it formatted). */
   pasteWorks?: boolean;
+  /** Whether Enter sends the composed message (live: once it did not, after a paste). */
+  enterSends?: boolean;
+  /** Whether clicking the pane's Send button sends it. */
+  sendButtonSends?: boolean;
 }
 
 /** A page whose visibility answers come from a jsdom document the fake keeps in sync. */
 function fakePage(opts: FakeOptions = {}) {
   const { chatButton = 'enabled', inputInPane = true, delivers = true, clickThrows = false } = opts;
+  const { enterSends = true, sendButtonSends = true } = opts;
   let paneOpen = opts.paneOpen ?? false;
   let waits = 0;
   const buttonState = () =>
@@ -63,6 +68,15 @@ function fakePage(opts: FakeOptions = {}) {
   render();
 
   const isChatButton = (sel: string) => teamsChatButtonSelectors.includes(sel);
+  const isSendButton = (sel: string) => teamsChatSendButtonSelectors.includes(sel);
+  const deliver = () => {
+    const message = doc.createElement('div');
+    message.setAttribute('data-tid', 'chat-pane-message');
+    message.innerHTML = `<div id="content-1">${composed}</div>`;
+    doc.getElementById('list')!.appendChild(message);
+    composed = '';
+    render();
+  };
   const isInput = (sel: string) => teamsChatInputSelectors.includes(sel);
 
   const page: ChatPage = {
@@ -72,6 +86,7 @@ function fakePage(opts: FakeOptions = {}) {
           return {
             async isVisible() {
               if (isChatButton(sel)) return buttonState() !== 'absent';
+              if (isSendButton(sel)) return paneOpen && inputInPane;
               if (isInput(sel)) return paneOpen && inputInPane;
               return false;
             },
@@ -86,6 +101,9 @@ function fakePage(opts: FakeOptions = {}) {
                 render();
               } else if (isInput(sel)) {
                 actions.push('focus-input');
+              } else if (isSendButton(sel)) {
+                actions.push('click-send');
+                if (sendButtonSends && delivers) deliver();
               }
             },
           };
@@ -97,14 +115,7 @@ function fakePage(opts: FakeOptions = {}) {
       async press(key: string) {
         actions.push(`press:${key}`);
         if (key === 'Shift+Enter') { composed += '\n'; render(); return; }
-        if (key === 'Enter' && delivers) {
-          const message = doc.createElement('div');
-          message.setAttribute('data-tid', 'chat-pane-message');
-          message.innerHTML = `<div id="content-1">${composed}</div>`;
-          doc.getElementById('list')!.appendChild(message);
-          composed = '';
-          render();
-        }
+        if (key === 'Enter' && delivers && enterSends) deliver();
       },
     },
     async evaluate<R, A>(fn: (arg: A) => R, arg: A): Promise<R> {
@@ -173,6 +184,24 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     check('unformatted text is typed, never pasted', [result.ok && result.format, actions.includes('paste-html')], ['plain', false]);
   }
 
+  console.log('\n=== a message Enter did not send ===');
+  {
+    const { page, actions } = fakePage({ paneOpen: true, enterSends: false });
+    const result = await sendTeamsChatMessage(page, 'attend help reply', FAST);
+    check('text left in the compose box is sent with the Send button', [result.ok, actions.includes('click-send')], [true, true]);
+    check('...and the result says it needed the button', result.ok && result.resent, true);
+  }
+  {
+    const { page, actions } = fakePage({ paneOpen: true });
+    await sendTeamsChatMessage(page, 'attend help reply', FAST);
+    check('Enter that sends needs no button', actions.includes('click-send'), false);
+  }
+  {
+    const { page } = fakePage({ paneOpen: true, enterSends: false, sendButtonSends: false });
+    const result = await sendTeamsChatMessage(page, 'attend help reply', FAST);
+    check('a message that never left the box says so', [!result.ok && result.reason, !result.ok && result.detail], ['not_rendered', 'text left in the compose box']);
+  }
+
   console.log('\n=== keeping the pane open for a listener ===');
   {
     const { page, actions, isPaneOpen } = fakePage();
@@ -235,7 +264,7 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
   console.log('\n=== text never leaves the compose box ===');
   {
     const { page } = fakePage({ delivers: false, paneOpen: true });
-    check('composed-but-unsent text is not reported as posted', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: false, reason: 'not_rendered' });
+    check('composed-but-unsent text is not reported as posted', await sendTeamsChatMessage(page, NOTICE, FAST), { ok: false, reason: 'not_rendered', detail: 'text left in the compose box' });
   }
 
   console.log('\n=== a broken page never throws out of the routine ===');
