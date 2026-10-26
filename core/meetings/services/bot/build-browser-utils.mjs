@@ -87,6 +87,7 @@ import {
 import {
   createTeamsSpeakers,
   createTeamsCaptions,
+  createTeamsChat,
 } from ${JSON.stringify(TEAMS)};
 import {
   createZoomSpeakers,
@@ -115,6 +116,7 @@ const VexaBrowserUtils = {
   // ── teams lane (voice-level "blue-square" outline → speaker hints) ──
   createTeamsSpeakers,       // capture-bridge.ts: w.VexaBrowserUtils.createTeamsSpeakers
   createTeamsCaptions,       // capture-bridge.ts: w.VexaBrowserUtils.createTeamsCaptions (live CC → diagnostics)
+  createTeamsChat,           // capture-bridge.ts: the chat reader behind the bot's chat commands (listenTeamsChat)
   // ── zoom lane (active-speaker DOM watcher → 'dom-active' naming hints) ──
   createZoomSpeakers,        // capture-bridge.ts: w.VexaBrowserUtils.createZoomSpeakers
 };

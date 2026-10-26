@@ -143,6 +143,42 @@
    ]
   },
   {
+   "key": "BOT_JOIN_NOTICE",
+   "class": "defaulted",
+   "default": "(unset - no notice)",
+   "description": "message each spawned bot posts once into the meeting chat right after admission (Teams); multi-line text forwarded verbatim; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
+   "key": "BOT_CHAT_HELP",
+   "class": "defaulted",
+   "default": "(unset - none)",
+   "description": "the bot's reply to 'attend help' in the Teams meeting chat; empty turns the chat commands (help / leave / discard) off; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
+   "key": "BOT_CHAT_LEAVE_ACK",
+   "class": "defaulted",
+   "default": "(unset - none)",
+   "description": "posted before the bot leaves on 'attend leave'; empty leaves without a reply; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
+   "key": "BOT_CHAT_DISCARD_ACK",
+   "class": "defaulted",
+   "default": "(unset - none)",
+   "description": "posted before the bot discards the recording and leaves on 'attend discard'; empty discards without a reply; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
    "key": "BOT_SPEAKER_MIN_AUDIO_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",

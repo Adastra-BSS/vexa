@@ -317,3 +317,7 @@ class RedisBus(Protocol):
         ``payload`` field). The collector is the SINGLE writer of the per-meeting native transcript
         feed ``tc:meeting:{native}`` (P23) — the copilot worker + terminal SSE read it."""
         ...
+
+    async def delete_stream(self, stream: str) -> Any:
+        """Drop a redis STREAM with all its entries (DEL) — a discarded meeting's transcript feed."""
+        ...

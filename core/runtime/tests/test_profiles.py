@@ -72,6 +72,17 @@ def test_meeting_bot_forwards_speaker_stream_tuning(monkeypatch):
     }
 
 
+def test_meeting_bot_forwards_the_join_notice_verbatim(monkeypatch):
+    """The notice is multi-line legal text in two languages: it must reach the bot byte for byte,
+    line breaks, quotes and diacritics included, and an empty one must not reach it at all."""
+    notice = 'Tato schůzka je nahrávána - "Attend Notetaker".\nThis meeting is recorded.'
+    monkeypatch.setenv("BOT_JOIN_NOTICE", notice)
+    assert default_registry().get("meeting-bot").base_env["BOT_JOIN_NOTICE"] == notice
+
+    monkeypatch.setenv("BOT_JOIN_NOTICE", "")
+    assert "BOT_JOIN_NOTICE" not in default_registry().get("meeting-bot").base_env
+
+
 def test_meeting_bot_carries_deployment_default_resources(monkeypatch):
     """BOT_CPU/BOT_MEMORY_MB (chart: runtime.botResources) become the profile's default Pod sizing.
     Without them a spawned bot requests nothing, so a dedicated pool's cluster autoscaler never
@@ -209,3 +220,19 @@ def test_command_overrides_ignore_blank_env(monkeypatch):
     reg = apply_command_overrides(default_registry())
     assert reg.resolve("meeting-bot").command is None  # image ENTRYPOINT is authoritative (#675)
     assert reg.resolve("agent").command == ["python", "-m", "worker"]
+
+
+def test_meeting_bot_forwards_the_chat_command_texts_verbatim(monkeypatch):
+    """The help text and the two replies are free text like the join notice, and an empty one
+    (commands off, or no reply) must not reach the bot."""
+    texts = {
+        "BOT_CHAT_HELP": 'Attend Notetaker - "attend leave" / "attend discard".\nPomoc: attend help',
+        "BOT_CHAT_LEAVE_ACK": "Leaving. The summary so far will be sent as usual.",
+        "BOT_CHAT_DISCARD_ACK": "",
+    }
+    for key, value in texts.items():
+        monkeypatch.setenv(key, value)
+    env = default_registry().get("meeting-bot").base_env
+    assert env["BOT_CHAT_HELP"] == texts["BOT_CHAT_HELP"]
+    assert env["BOT_CHAT_LEAVE_ACK"] == texts["BOT_CHAT_LEAVE_ACK"]
+    assert "BOT_CHAT_DISCARD_ACK" not in env

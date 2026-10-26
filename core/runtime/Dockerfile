@@ -9,7 +9,7 @@ FROM python:3.12-slim
 
 # kubectl — only invoked by the K8sBackend (RUNTIME_BACKEND=k8s). Pinned static binary; harmless for
 # the default docker/process backends. Arch-aware so the image builds on amd64 and arm64 hosts.
-ARG KUBECTL_VERSION=v1.31.4
+ARG KUBECTL_VERSION=v1.36.5
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates curl; \
     arch="$(dpkg --print-architecture)"; case "$arch" in amd64) karch=amd64;; arm64) karch=arm64;; *) karch="$arch";; esac; \
@@ -18,7 +18,7 @@ RUN set -eux; \
     apt-get purge -y curl; apt-get autoremove -y; rm -rf /var/lib/apt/lists/*
 
 # uv via PyPI (ghcr.io is unreachable in this build env) — pinned for deterministic resolves.
-RUN pip install --no-cache-dir uv==0.9.22
+RUN pip install --no-cache-dir uv==0.13.5
 
 ENV UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \

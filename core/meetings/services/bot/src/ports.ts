@@ -33,13 +33,17 @@ export interface JoinResult {
 
 /** Drives the platform join. The real adapter wraps @vexa/join.joinMeeting + admission
  *  watchers + the removal monitor over a @vexa/remote-browser page. */
+export type RemovalKind = 'removed_by_participant' | 'ended';
+
 export interface JoinDriver {
   /** Join + await admission. `report` fires on each intermediate lifecycle state
    *  (awaiting_admission / needs_help / active). Resolves with the verdict — a bare `JoinOutcome`
    *  or a `JoinResult` that also carries the failure's human reason text (#926). */
   join(report: (s: BotStatus) => void | Promise<void>): Promise<JoinOutcome | JoinResult>;
-  /** Watch for being removed from the meeting while active; returns a stop fn. */
-  onRemoval(cb: () => void): () => void;
+  /** Watch for being removed from the meeting while active; returns a stop fn. `kind` says how the
+   *  stay ended where the platform can tell: a participant removed the bot, or the call went away
+   *  (`ended`). Platforms that cannot tell report no kind, which is treated as `ended`. */
+  onRemoval(cb: (kind?: RemovalKind) => void): () => void;
   /** Leave the meeting (best-effort; never throws fatally). */
   leave(reason: string): Promise<void>;
   /** Withdraw a PENDING join request from the waiting room / pre-join screen (Bug 2): cancel the
@@ -112,6 +116,10 @@ export interface AlonenessSource {
  *  adapter is @vexa/recording's assembler → upload; the orchestrator only signals close. */
 export interface RecordingSink {
   close(key: string): void;
+  /** Discard (the meeting's objection path): stop delivering anything for `key` - queued chunks are
+   *  dropped and close() sends no final signal. A chunk already in flight still lands; the server's
+   *  deletion of a discarded meeting removes it. Optional: a sink without it cannot discard. */
+  abort?(key: string): void;
 }
 
 /** One captured-signal.v1 frame as it crosses the capture-bridge tap — the VERBATIM raw

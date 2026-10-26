@@ -1,6 +1,27 @@
 import { Page } from "playwright";
 import { log } from "../_host";
-import { teamsRemovalIndicators } from "./selectors";
+import { teamsRemovalIndicators, teamsRemovedByParticipantIndicators } from "./selectors";
+
+/** How the bot's stay ended: a participant removed it, or the call went away under it (meeting
+ *  ended, connection lost). Only the first is an objection to the recording. */
+export type TeamsRemovalKind = "removed_by_participant" | "ended";
+
+/** Which ending is on screen, or null while the bot is still in the call. */
+export async function classifyTeamsRemoval(page: Page): Promise<TeamsRemovalKind | null> {
+  const anyVisible = async (selectors: string[]): Promise<boolean> => {
+    for (const selector of selectors) {
+      try {
+        if (await page.locator(selector).first().isVisible()) return true;
+      } catch {
+        continue;
+      }
+    }
+    return false;
+  };
+  if (await anyVisible(teamsRemovedByParticipantIndicators)) return "removed_by_participant";
+  if (await anyVisible(teamsRemovalIndicators)) return "ended";
+  return null;
+}
 
 // Function to check if bot has been removed from the meeting
 export async function checkForTeamsRemoval(page: Page): Promise<boolean> {
@@ -26,16 +47,16 @@ export async function checkForTeamsRemoval(page: Page): Promise<boolean> {
 }
 
 // Start periodic removal monitoring from Node.js side
-export function startTeamsRemovalMonitor(page: Page, onRemoval?: () => void | Promise<void>): () => void {
+export function startTeamsRemovalMonitor(page: Page, onRemoval?: (kind: TeamsRemovalKind) => void | Promise<void>): () => void {
   log("Starting periodic Teams removal monitoring...");
   let removalDetected = false;
 
   const removalCheckInterval = setInterval(async () => {
     try {
-      const isRemoved = await checkForTeamsRemoval(page);
-      if (isRemoved && !removalDetected) {
+      const kind = await classifyTeamsRemoval(page);
+      if (kind && !removalDetected) {
         removalDetected = true; // Prevent duplicate detection
-        log("🚨 Teams removal detected from Node.js side. Initiating graceful shutdown...");
+        log(`Teams removal detected from Node.js side (${kind}). Initiating graceful shutdown...`);
         clearInterval(removalCheckInterval);
 
         try {
@@ -59,7 +80,7 @@ export function startTeamsRemovalMonitor(page: Page, onRemoval?: () => void | Pr
         } catch {}
 
         // Signal removal to caller
-        try { await onRemoval?.(); } catch {}
+        try { await onRemoval?.(kind); } catch {}
       }
     } catch (error: any) {
       log(`Error during removal check: ${error.message}`);

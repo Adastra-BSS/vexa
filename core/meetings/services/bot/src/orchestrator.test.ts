@@ -220,6 +220,86 @@ async function main(): Promise<void> {
     check('removal: sequence reached active', seq(lc.events).includes('active'));
   }
 
+  // ── discard: the objection path - nothing more is recorded, and the terminal event says so ──
+  const spyRecording = () => {
+    const calls: string[] = [];
+    return { calls, close: (k: string) => { calls.push(`close:${k}`); }, abort: (k: string) => { calls.push(`abort:${k}`); } };
+  };
+  {
+    const lc = recordingSink();
+    const recording = spyRecording();
+    const o = createOrchestrator(inv(), { lifecycle: lc, join: mockJoin('admitted'), pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), recording, now: () => '2026-10-22T12:00:00.000Z' });
+    const runP = o.run();
+    setTimeout(() => o.discard('command'), 5);
+    const res = await runP;
+    const terminal = last(lc.events) as LifecycleEvent & { discarded?: { at: string; trigger: string } };
+    check('discard command: completed', res.status === 'completed', JSON.stringify(terminal));
+    check('discard command: the terminal event carries discarded {at, trigger: command}',
+      terminal.discarded?.trigger === 'command' && terminal.discarded.at === '2026-10-22T12:00:00.000Z', JSON.stringify(terminal));
+    check('discard command: the recording is aborted and never closed', recording.calls.some((c) => c.startsWith('abort')) && !recording.calls.some((c) => c.startsWith('close')), JSON.stringify(recording.calls));
+    check('discard command: isDiscarded() says so', o.isDiscarded() === true);
+    check('discard command: events conform', allConform(lc.events));
+  }
+  {
+    const lc = recordingSink();
+    const recording = spyRecording();
+    let fireRemoval: (kind?: 'removed_by_participant' | 'ended') => void = () => {};
+    const join = mockJoin('admitted', (fire) => { fireRemoval = fire as typeof fireRemoval; });
+    const o = createOrchestrator(inv(), { lifecycle: lc, join, pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), recording });
+    const runP = o.run();
+    setTimeout(() => fireRemoval('removed_by_participant'), 5);
+    await runP;
+    const terminal = last(lc.events) as LifecycleEvent & { discarded?: { trigger: string } };
+    check('removed by a participant: completed(evicted)', terminal.completion_reason === 'evicted', JSON.stringify(terminal));
+    check('removed by a participant: discarded {trigger: removed}', terminal.discarded?.trigger === 'removed', JSON.stringify(terminal));
+    check('removed by a participant: the recording is aborted', recording.calls.some((c) => c.startsWith('abort')) && !recording.calls.some((c) => c.startsWith('close')), JSON.stringify(recording.calls));
+    check('removed by a participant: events conform', allConform(lc.events));
+  }
+  for (const kind of ['ended', undefined] as const) {
+    const lc = recordingSink();
+    const recording = spyRecording();
+    let fireRemoval: (kind?: 'removed_by_participant' | 'ended') => void = () => {};
+    const join = mockJoin('admitted', (fire) => { fireRemoval = fire as typeof fireRemoval; });
+    const o = createOrchestrator(inv(), { lifecycle: lc, join, pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), recording });
+    const runP = o.run();
+    setTimeout(() => fireRemoval(kind), 5);
+    await runP;
+    const terminal = last(lc.events) as LifecycleEvent & { discarded?: unknown };
+    check(`call ended (${kind ?? 'no kind'}): completed(evicted), recording kept`,
+      terminal.completion_reason === 'evicted' && terminal.discarded === undefined && recording.calls.some((c) => c.startsWith('close')) && !recording.calls.some((c) => c.startsWith('abort')),
+      JSON.stringify({ terminal, calls: recording.calls }));
+    check(`call ended (${kind ?? 'no kind'}): isDiscarded() is false`, o.isDiscarded() === false);
+  }
+
+  // ── join notice: posted once, after capture started, never gating the meeting ──
+  {
+    const lc = recordingSink();
+    const order: string[] = [];
+    const pipeline = { async start() { order.push('pipeline.start'); }, async stop() { /* */ } };
+    const notice = { async post() { order.push('notice.post'); } };
+    const o = createOrchestrator(inv(), { lifecycle: lc, join: mockJoin('admitted'), pipeline, acts: noopActs(), aloneness: noopAloneness(), notice });
+    const res = await o.run({ maxActiveMs: 5 });
+    check('notice: posted exactly once', order.filter((s) => s === 'notice.post').length === 1, JSON.stringify(order));
+    check('notice: posted after capture started', order.indexOf('pipeline.start') < order.indexOf('notice.post'), JSON.stringify(order));
+    check('notice: the meeting still completes normally', res.status === 'completed' && allConform(lc.events));
+  }
+  {
+    let posted = 0;
+    const notice = { async post() { posted++; } };
+    const o = createOrchestrator(inv(), { lifecycle: recordingSink(), join: mockJoin('rejected'), pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), notice });
+    await o.run();
+    check('notice: never posted when the bot was not admitted', posted === 0, String(posted));
+  }
+  {
+    const lc = recordingSink();
+    const hung = { post: () => new Promise<void>(() => { /* a chat that never answers */ }) };
+    const res = await createOrchestrator(inv(), { lifecycle: lc, join: mockJoin('admitted'), pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), notice: hung }).run({ maxActiveMs: 5 });
+    check('notice: a hung post does not hold the meeting', res.status === 'completed' && last(lc.events).completion_reason === 'max_bot_time_exceeded');
+    const rejecting = { post: () => Promise.reject(new Error('page gone')) };
+    const res2 = await createOrchestrator(inv(), { lifecycle: recordingSink(), join: mockJoin('admitted'), pipeline: noopPipeline(), acts: noopActs(), aloneness: noopAloneness(), notice: rejecting }).run({ maxActiveMs: 5 });
+    check('notice: a rejecting post does not change the outcome', res2.status === 'completed');
+  }
+
   // ── hard time cap → completed(max_bot_time_exceeded) ──
   {
     const lc = recordingSink();

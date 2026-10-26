@@ -210,6 +210,27 @@ const onlyBots = (n: number) => ({ participants: n, named: n, bots: n });
   check('an empty room at the empty-room window fires', fired === 1);
 }
 
+// Meeting 43 on dev: opening the chat pane made the participant scan read nobody while the person
+// went on talking. A room the bot can still hear is not empty, whatever the scan reads.
+{
+  const f = fixture(600_000, 300);
+  let fired = 0;
+  f.activity.ready();
+  f.source.onAlone(() => fired++);
+  f.activity.observeRoster(people(1));
+  f.activity.observeRoster(nobody);
+  for (let t = 0; t < 10; t++) {
+    f.clock.advance(100);
+    f.activity.observeRemoteEnergy(loudEnergy);
+    f.scheduler.tick();
+  }
+  check('an empty roster with someone still speaking does not fire', fired === 0);
+  f.clock.advance(299); f.scheduler.tick();
+  check('...nor before the empty-room window of silence has passed', fired === 0);
+  f.clock.advance(1); f.scheduler.tick();
+  check('...and fires once the room has been silent for the empty-room window', fired === 1);
+}
+
 // Meetings 18/19 on dev: the bot's own nameless avatar is what an empty Teams room looks like.
 {
   const f = fixture(10_000, 300);

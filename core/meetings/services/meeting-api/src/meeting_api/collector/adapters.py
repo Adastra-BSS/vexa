@@ -1387,6 +1387,9 @@ class RedisStreamBus:
         ``tc:meeting:{native}`` the collector owns as single writer (P23)."""
         return await self._client.xadd(stream, {"payload": json.dumps(payload)})
 
+    async def delete_stream(self, stream):
+        return await self._client.delete(stream)
+
 
 def build_production_app(
     *,

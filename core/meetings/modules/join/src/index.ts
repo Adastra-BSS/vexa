@@ -14,7 +14,8 @@ import { startGoogleRemovalMonitor } from "./googlemeet/removal";
 import { joinMicrosoftTeams } from "./msteams/join";
 import { waitForTeamsMeetingAdmission, checkForTeamsAdmissionSilent } from "./msteams/admission";
 import { prepareForRecording as prepareForTeamsRecording, leaveMicrosoftTeams } from "./msteams/leave";
-import { startTeamsRemovalMonitor } from "./msteams/removal";
+import { startTeamsRemovalMonitor, type TeamsRemovalKind } from "./msteams/removal";
+import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, openTeamsChatPane, sendTeamsChatMessage, type TeamsChatFailure, type TeamsChatOpenResult, type TeamsChatSendResult } from "./msteams/chat";
 import { joinZoomMeeting, buildZoomWebClientUrl } from "./zoom/join";
 import { waitForZoomMeetingAdmission, checkForZoomAdmissionSilent } from "./zoom/admission";
 import { leaveZoomMeeting, dismissZoomPopups } from "./zoom/leave";
@@ -32,6 +33,12 @@ export { startDebugView, setHooks };
 // Canonical browser launch args — the vexa-bot service and the debug harness both
 // build on this ONE set (browser-args.ts), so join↔bot flags never drift.
 export { JOIN_BROWSER_ARGS, getJoinBrowserArgs };
+// Post into the Teams meeting chat once seated (the bot's join notice).
+// ...and keep the chat pane open for the bot's chat commands.
+export { TEAMS_CHAT_BUTTON_TIMEOUT_MS, openTeamsChatPane, sendTeamsChatMessage };
+export type { TeamsChatFailure, TeamsChatOpenResult, TeamsChatSendResult };
+// How a Teams stay ended: a participant removed the bot, or the call went away under it.
+export type { TeamsRemovalKind };
 
 export type Platform = "google_meet" | "teams" | "zoom" | "jitsi";
 

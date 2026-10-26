@@ -1,0 +1,134 @@
+/**
+ * The bot's chat commands: anyone in the meeting can write `attend help`, `attend leave` or
+ * `attend discard` in the meeting chat (any case, colon optional).
+ *
+ *   help     the help text (legal basics, what the commands do), every time it is asked
+ *   leave    reply, then leave - what was recorded so far is processed as usual
+ *   discard  reply, then leave and discard everything recorded (the orchestrator's discard path)
+ *
+ * The texts are a deployment setting (BOT_CHAT_HELP / BOT_CHAT_LEAVE_ACK / BOT_CHAT_DISCARD_ACK);
+ * an empty help text turns the commands off. Pure: the chat it reads and writes are injected, so
+ * the whole grammar and every rule is unit-tested offline. Nothing anyone writes is logged - the
+ * events carry the command name only.
+ */
+import { botEvent } from './telemetry.js';
+import type { NoticeSendResult } from './join-notice.js';
+
+export type ChatCommand = 'help' | 'leave' | 'discard';
+
+export interface ChatCommandTexts {
+  help: string;
+  leaveAck: string;
+  discardAck: string;
+}
+
+export interface ChatMessage {
+  sender: string;
+  text: string;
+  /** Teams' own send time, when the message carries one - so a slow read and a slow reply can be
+   *  told apart. */
+  sentAt?: string;
+}
+
+export interface ChatCommands {
+  handle(message: ChatMessage): Promise<void>;
+}
+
+export interface ChatCommandsOptions {
+  texts: ChatCommandTexts;
+  /** The bot's display name. Teams may append "(Unverified)" or "(Guest)", so it is a prefix. */
+  botName: string;
+  send: (text: string) => Promise<NoticeSendResult>;
+  onLeave: () => void;
+  onDiscard: () => void;
+  meetingId?: string | number;
+  emit?: (event: string, fields?: Record<string, unknown>) => void;
+  now?: () => number;
+  /** A reply that does not land within this (default 20 s - delivery, plus the Send-button retry) is
+   *  given up on, so a slow chat never stalls a leave. */
+  replyTimeoutMs?: number;
+}
+
+const COMMAND = /^attend\s*:?\s*(help|leave|discard)\s*[.!]?$/;
+
+export function parseChatCommand(text: string): ChatCommand | null {
+  const match = COMMAND.exec(text.replace(/\s+/g, ' ').trim().toLowerCase());
+  return match ? (match[1] as ChatCommand) : null;
+}
+
+export function resolveChatCommandTexts(env: NodeJS.ProcessEnv): ChatCommandTexts {
+  return {
+    help: (env.BOT_CHAT_HELP ?? '').trim(),
+    leaveAck: (env.BOT_CHAT_LEAVE_ACK ?? '').trim(),
+    discardAck: (env.BOT_CHAT_DISCARD_ACK ?? '').trim(),
+  };
+}
+
+/** One writer for one chat: each post waits for the one before it, and a failed post never jams
+ *  the ones behind it. The join notice and the command replies share it. */
+export function serializeSends<R>(send: (text: string) => Promise<R>): (text: string) => Promise<R> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return (text) => {
+    const next = tail.then(() => send(text));
+    tail = next.catch(() => undefined);
+    return next;
+  };
+}
+
+/** The commands, or undefined when the help text is empty (commands off). */
+export function createChatCommands(opts: ChatCommandsOptions): ChatCommands | undefined {
+  const { texts, send, onLeave, onDiscard, meetingId, emit = botEvent, now = Date.now } = opts;
+  const { replyTimeoutMs = 20_000 } = opts;
+  if (!texts.help) return undefined;
+  const self = opts.botName.trim().toLowerCase();
+  let ended = false;
+
+  const reply = async (command: ChatCommand, text: string): Promise<void> => {
+    if (!text) return;
+    const startedAt = now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<NoticeSendResult>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, reason: 'timeout' }), replyTimeoutMs);
+    });
+    let result: NoticeSendResult;
+    try {
+      result = await Promise.race([send(text), timedOut]);
+    } catch (e) {
+      result = { ok: false, reason: 'error', detail: String((e as Error)?.message ?? e).slice(0, 200) };
+    } finally {
+      clearTimeout(timer);
+    }
+    if (result.ok) {
+      emit('chat_reply_posted', {
+        meeting_id: meetingId, command, duration_ms: now() - startedAt, ...(result.timings ?? {}),
+        ...(result.format ? { format: result.format } : {}), ...(result.resent ? { resent: true } : {}),
+      });
+    }
+    if (!result.ok) {
+      emit('chat_reply_failed', { meeting_id: meetingId, command, reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) });
+    }
+  };
+
+  return {
+    async handle({ sender, text, sentAt }) {
+      if (ended || (self && sender.trim().toLowerCase().startsWith(self))) return;
+      const command = parseChatCommand(text);
+      if (!command) return;
+      const sent = sentAt ? Date.parse(sentAt) : Number.NaN;
+      const age = Number.isFinite(sent) ? { age_ms: Math.max(0, now() - sent) } : {};
+
+      if (command === 'help') {
+        emit('chat_command', { meeting_id: meetingId, command, ...age });
+        await reply(command, texts.help);
+        return;
+      }
+
+      // Leave and discard end the bot's stay: one of them wins, and nothing after it is obeyed.
+      ended = true;
+      emit('chat_command', { meeting_id: meetingId, command, ...age });
+      await reply(command, command === 'leave' ? texts.leaveAck : texts.discardAck);
+      if (command === 'leave') onLeave();
+      else onDiscard();
+    },
+  };
+}

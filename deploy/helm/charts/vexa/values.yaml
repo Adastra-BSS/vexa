@@ -271,6 +271,15 @@ runtime:
   # bot leaves, whatever the silence window. Empty uses the bot's 5-minute default; 0 disables the
   # rule (silence alone decides).
   emptyRoomWindowMs: ""
+  # Message every bot posts once into the meeting chat right after admission (Teams), e.g. a
+  # recording notice. Multi-line text is kept as is; empty posts nothing.
+  joinNotice: ""
+  # Chat commands (Teams): anyone in the meeting can write "attend help", "attend leave" or "attend
+  # discard". chatHelp is the reply to help; empty turns the commands off. The two acks are posted
+  # before the bot leaves or discards; empty leaves or discards without a reply.
+  chatHelp: ""
+  chatLeaveAck: ""
+  chatDiscardAck: ""
   # Requests/limits stamped onto every SPAWNED bot Pod (emitted as both requests AND limits).
   # Empty = no resources block, today's behaviour - but then a dedicated bot pool's cluster
   # autoscaler has nothing to scale on and every bot bin-packs onto one node. The memory limit

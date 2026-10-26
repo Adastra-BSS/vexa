@@ -92,9 +92,11 @@ export const teamsRejectionIndicators: string[] = [
   'button[aria-label*="denied"]'
 ];
 
-// Teams removal/error state indicators
-export const teamsRemovalIndicators: string[] = [
-  // Strong removal/error messages
+// A participant removed the bot from the meeting - as opposed to the call ending or the connection
+// dropping. Attend reads a removal as an objection and discards the recording, so this list must
+// hold the removal texts only. "You've been removed from this meeting" is what a removed guest sees
+// (Attend teams_chat_spike, 2026-10-22); "End meeting for everyone" shows none of these texts.
+export const teamsRemovedByParticipantIndicators: string[] = [
   'text="You\'ve been removed from this meeting"',
   'text=You\'ve been removed from this meeting',
   'text=You’ve been removed from this meeting', // typographic apostrophe (live Teams copy)
@@ -102,6 +104,12 @@ export const teamsRemovalIndicators: string[] = [
   'text=You have been removed from this meeting',
   'text="Removed from meeting"',
   'text=Removed from meeting',
+];
+
+// Teams removal/error state indicators
+export const teamsRemovalIndicators: string[] = [
+  // Strong removal/error messages
+  ...teamsRemovedByParticipantIndicators,
 
   // Error states
   'text="Meeting ended"',
@@ -227,6 +235,42 @@ export const teamsNameInputSelectors: string[] = [
 // Primary hangup button selector (most reliable)
 export const teamsPrimaryHangupButtonSelector = '#hangup-button';
 
+// Meeting chat (chat.ts). `#chat-button` is the in-call toolbar toggle an anonymous guest sees,
+// confirmed live (Attend teams_chat_spike, 2026-10-22); it opens and closes the "Meeting chat" pane.
+export const teamsChatButtonSelectors: string[] = [
+  '#chat-button',
+  'button[data-tid="chat-button"]',
+  'button[aria-label="Chat"]',
+];
+
+// The pane's compose box. Teams' editor is a contenteditable CKEditor; the textarea entries cover
+// older builds (legacy services/vexa-bot chat.ts).
+export const teamsChatInputSelectors: string[] = [
+  '[data-tid="ckeditor"][contenteditable="true"]',
+  '[contenteditable="true"][aria-label*="message" i]',
+  'div[role="textbox"][contenteditable="true"]',
+  'textarea[aria-label*="Type a message"]',
+  'textarea[aria-label*="Type a new message"]',
+];
+
+// The pane's Send button, beside the compose box (the spike saw it as aria-label "Send"). A
+// message Enter left in the box - seen live once after a paste - is sent with it.
+export const teamsChatSendButtonSelectors: string[] = [
+  'button[data-tid="newMessageCommands-send"]',
+  'button[name="send"]',
+  'button[aria-label="Send"]',
+  'button[title="Send"]',
+];
+
+// One rendered entry of the message list - never the compose box, which holds the same text for a
+// moment after Enter. `[data-tid="chat-pane-message"]` matched live (teams_chat_spike).
+// BROWSER CONTEXT: consumed by chatMessageRendered via document.querySelectorAll.
+export const teamsChatMessageSelectors: string[] = [
+  '[data-tid="chat-pane-message"]',
+  'div[data-tid^="chat-pane-message"]',
+  'div[data-mid]',
+];
+
 // Teams comprehensive leave matchers (stateless — covers all scenarios).
 // BROWSER CONTEXT: consumed inside page.evaluate via document.querySelector —
 // declared in browserContextSelectorArrays below, so the validity gate
@@ -289,4 +333,4 @@ export const teamsLeaveButtonMatchers: BrowserContextButtonMatcher[] = [
 // `css` field: a Playwright-only `:has-text()` — invalid in that context —
 // would otherwise ship green as a dead selector. `text` fields are raw strings
 // matched against textContent in-page, never parsed as selectors.
-export const browserContextSelectorArrays: string[] = ['teamsLeaveButtonMatchers'];
+export const browserContextSelectorArrays: string[] = ['teamsLeaveButtonMatchers', 'teamsChatMessageSelectors'];
