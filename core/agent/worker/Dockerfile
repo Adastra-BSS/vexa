@@ -9,7 +9,7 @@
 # files are vendored under /app so the walk-up resolves repo_root == /app.
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir uv==0.9.22
+RUN pip install --no-cache-dir uv==0.13.5
 
 ENV UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \

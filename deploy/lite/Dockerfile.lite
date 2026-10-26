@@ -124,7 +124,7 @@ COPY --from=valkey-builder /valkey-COPYING /usr/local/share/valkey/LICENSE
 RUN valkey-server --version && command -v valkey-cli
 
 # uv (the per-service venvs are resolved from each service's own pyproject + uv.lock).
-RUN pip3 install --no-cache-dir uv==0.9.22
+RUN pip3 install --no-cache-dir uv==0.13.5
 
 ENV UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1 \
