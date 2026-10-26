@@ -48,7 +48,6 @@ import { createJoinNotice, resolveJoinNotice, type JoinNotice } from './join-not
 import { createChatCommands, resolveChatCommandTexts, serializeSends, type ChatCommands } from './chat-commands.js';
 import { botEvent } from './telemetry.js';
 import { openTeamsChatPane, sendTeamsChatMessage } from '@vexa/join';
-import { followChatLayout, sampleChatLayout } from './chat-layout-probe.js';
 import type {
   JoinDriver,
   Pipeline,
@@ -167,15 +166,12 @@ function meetingChatFor(
   if (!notice && !commands) return {};
   const afterAdmission: JoinNotice = {
     async post() {
-      if (teams) await sampleChatLayout(page, botEvent, inv.meeting_id, 'before');
       if (notice) await notice.post();
-      if (teams && !commands) followChatLayout(page, botEvent, inv.meeting_id);
       if (!commands) return;
       // Already open after the notice; opened here when there is no notice, or the notice failed.
       const opened = await openTeamsChatPane(page);
       if (opened.ok) botEvent('chat_listening', { meeting_id: inv.meeting_id });
       else botEvent('chat_listen_failed', { meeting_id: inv.meeting_id, reason: opened.reason, ...(opened.detail ? { detail: opened.detail } : {}) });
-      followChatLayout(page, botEvent, inv.meeting_id);
     },
   };
   return { afterAdmission, commands };
