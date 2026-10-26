@@ -116,6 +116,12 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && rm -rf /var/lib/apt/lists/* \
     && aws --version
 
+# The npm CLI the Node base ships is never run here: dependencies are installed by pnpm in the
+# builder and the worker is started with plain `node`. It bundles its own node-tar, which the
+# release scan blocks on (CVE-2026-59873, tar 7.4.3 under npm/node_modules), so it is removed.
+RUN rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx \
+    && node --version
+
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     DISPLAY=:99 \
     NODE_ENV=production
