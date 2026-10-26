@@ -120,10 +120,13 @@ function makeTile(
 function installDocument(
   tiles: FakeEl[],
   panelRows: FakeEl[] = [],
-  opts: { streamWrappersOnly?: boolean; outlineAtomsOnly?: boolean } = {},
+  opts: { streamWrappersOnly?: boolean; outlineAtomsOnly?: boolean; elsewhere?: FakeEl[] } = {},
 ): FakeEl {
   const panel = panelRows.length ? new FakeEl('div', { 'data-tid': 'roster' }, panelRows) : null;
-  const body = new FakeEl('body', {}, panel ? [...tiles, panel] : tiles);
+  // Other surfaces on the page that are not participants (the meeting chat pane), answered for any
+  // selector they match.
+  const elsewhere = opts.elsewhere ?? [];
+  const body = new FakeEl('body', {}, [...tiles, ...(panel ? [panel] : []), ...elsewhere]);
   g.document = {
     body,
     querySelector: (s: string) => (s === '[role="main"]' ? body : null),
@@ -142,7 +145,7 @@ function installDocument(
         return opts.streamWrappersOnly || opts.outlineAtomsOnly ? [] : tiles;
       }
       if (panel && compile(s)(panel)) return [panel];
-      return [];
+      return elsewhere.flatMap((root) => [root, ...root.querySelectorAll(s)].filter((el) => el.matches(s)));
     },
   };
   return body;
@@ -157,13 +160,14 @@ interface Harness {
 }
 function start(tiles: FakeEl[], overrides: Record<string, unknown> = {}): Harness {
   const {
-    panelRows = [], streamWrappersOnly = false, outlineAtomsOnly = false, ...watcherOverrides
+    panelRows = [], streamWrappersOnly = false, outlineAtomsOnly = false, elsewhere = [], ...watcherOverrides
   } = overrides as {
     panelRows?: FakeEl[];
     streamWrappersOnly?: boolean;
     outlineAtomsOnly?: boolean;
+    elsewhere?: FakeEl[];
   };
-  installDocument(tiles, panelRows, { streamWrappersOnly, outlineAtomsOnly });
+  installDocument(tiles, panelRows, { streamWrappersOnly, outlineAtomsOnly, elsewhere });
   rafQueue = [];
   let clock = 1_700_000_000_000;
   const hints: Array<{ name: string; id: string; isEnd: boolean }> = [];
@@ -662,6 +666,31 @@ const ofType = (observations: TeamsProducerObservation[], type: string): TeamsPr
   const last = (ofType(h.observations, 'roster-coverage') as any[]).at(-1);
   check('bots: another notetaker is named and counted as a bot, our own tile as neither',
     last?.named === 2 && last?.participants === 2 && last?.bots === 1, JSON.stringify(last));
+  h.watcher.destroy();
+}
+{
+  // Dev meetings 46, 52 and 67 (dev-ci e2e): the participant count rose by one the moment the bot
+  // opened the chat pane, because Teams renders every chat message as a list item, and after the last
+  // person left the room never read empty. The chat pane is not the meeting: nothing in it is a
+  // participant, however it is marked up.
+  const message = (author: string, body: string): FakeEl => new FakeEl('div', { 'data-tid': 'chat-pane-item', role: 'listitem' }, [
+    new FakeEl('div', { 'data-tid': 'chat-pane-message' }, [
+      new FakeEl('span', { 'data-tid': 'message-author-name', title: author }, [], author),
+      new FakeEl('div', { id: 'content-1' }, [new FakeEl('ul', {}, [new FakeEl('li', { role: 'listitem' }, [], body)])]),
+    ]),
+  ]);
+  const chat = new FakeEl('div', { 'data-tid': 'chat-pane-list', role: 'list' }, [
+    message('Attend Notetaker - dev-ci (Unverified)', 'Recording notice'),
+    message('Priya Nair', 'attend help'),
+  ]);
+  const tiles = [makeTile('p1', 'Dmitry Grankin', { outline: true }).tile];
+  const h = start(tiles, { selfName: 'Attend Notetaker - dev-ci', elsewhere: [chat] });
+  await settle();
+  const last = (ofType(h.observations, 'roster-coverage') as any[]).at(-1);
+  check('chat pane: its messages are not participants, so one person in the call is 1/1',
+    last?.named === 1 && last?.participants === 1, JSON.stringify(last));
+  const names = (ofType(h.observations, 'roster-name') as any[]).map((o) => o.name);
+  check('chat pane: a chat author never enters the roster', !names.includes('Priya Nair'), JSON.stringify(names));
   h.watcher.destroy();
 }
 {

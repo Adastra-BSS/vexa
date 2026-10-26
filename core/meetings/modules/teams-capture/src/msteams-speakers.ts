@@ -116,6 +116,19 @@ export const teamsMeetingContainerSelectors: string[] = [
 ];
 
 const VOICE_LEVEL_SELECTOR = '[data-tid="voice-level-stream-outline"]';
+/** The meeting chat pane (the containers teams-chat.ts reads messages from). Teams renders every
+ *  chat message as a list item, so the broad tile selectors match each message, and its author
+ *  would count as one more person in the room. Nothing inside it is a participant. */
+const CHAT_PANE_SELECTOR = [
+  '[data-tid^="chat-pane"]',
+  '[data-tid="message-pane-list-runway"]',
+  '[data-tid="chatPaneMessageList"]',
+  '[role="log"]',
+].join(', ');
+
+function isInChatPane(element: HTMLElement): boolean {
+  return !!(element as any).closest?.(CHAT_PANE_SELECTOR);
+}
 const STREAM_WRAPPER_SELECTOR = '[data-stream-type][data-tid]';
 const STABLE_PARTICIPANT_ROOT_SELECTOR = [
   '[data-participant-id]',
@@ -1356,7 +1369,7 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
     const nameContext: TeamsNameCandidateContext = { rosterNames: panelNames };
     for (const selector of allSelectors) {
       document.querySelectorAll(selector).forEach(el => {
-        if (el instanceof HTMLElement) {
+        if (el instanceof HTMLElement && !isInChatPane(el)) {
           const surface = canonicalParticipantSurface(el);
           if (seen.has(surface)) return;
           seen.add(surface);
@@ -1436,10 +1449,11 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
       mutation.addedNodes.forEach(node => {
         if (node.nodeType !== Node.ELEMENT_NODE) return;
         const el = node as HTMLElement;
+        if (isInChatPane(el)) return;
         for (const selector of allSelectors) {
           if (el.matches(selector)) observeParticipant(canonicalParticipantSurface(el));
           el.querySelectorAll(selector).forEach(child => {
-            if (child instanceof HTMLElement) observeParticipant(canonicalParticipantSurface(child));
+            if (child instanceof HTMLElement && !isInChatPane(child)) observeParticipant(canonicalParticipantSurface(child));
           });
         }
       });
