@@ -319,7 +319,8 @@ def test_the_terminal_event_persists_who_was_in_the_room():
     """Silent participants included, so a consumer can tell them from invitees who never came."""
     terminal = {
         "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
-        "completion_reason": "stopped", "participants": _PRESENCE, "recording_t0_ms": 1780000000000,
+        "completion_reason": "stopped", "participants": _PRESENCE, "roster_complete": True,
+        "recording_t0_ms": 1780000000000,
     }
     conforms(terminal, "LifecycleEvent")
 
@@ -327,6 +328,7 @@ def test_the_terminal_event_persists_who_was_in_the_room():
     final = _drive(client, JOINING, ACTIVE, terminal)[-1]
 
     assert final["data"]["participants"] == _PRESENCE
+    assert final["data"]["roster_complete"] is True
 
 
 def test_malformed_presence_entries_are_dropped():
@@ -337,6 +339,7 @@ def test_malformed_presence_entries_are_dropped():
     })[-1]
 
     assert final["data"]["participants"] == [_PRESENCE[0]]
+    assert "roster_complete" not in final["data"], "no claim the bot did not make"
 
 
 @pytest.mark.parametrize("rule", ["empty-room", "silence"])

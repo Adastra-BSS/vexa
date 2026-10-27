@@ -273,6 +273,8 @@ class MeetingRecord:
     #: Who was in the room by name, silent participants included: first and last roster sighting
     #: in ms from the recording's t=0. Lets a consumer tell a listener from an invitee who never came.
     participants: Optional[List[Dict[str, Any]]] = None
+    #: Whether every roster scan named everyone it saw - only then is a voice nobody named one of them.
+    roster_complete: Optional[bool] = None
     recording_t0_ms: Optional[int] = None
     #: Why a left_alone bot decided it was alone: the room emptied, or it fell silent.
     alone_rule: Optional[str] = None
@@ -321,6 +323,8 @@ class MeetingRecord:
             d["speaker_events"] = list(self.speaker_events)
         if self.participants is not None:
             d["participants"] = list(self.participants)
+        if self.roster_complete is not None:
+            d["roster_complete"] = self.roster_complete
         if self.recording_t0_ms is not None:
             d["recording_t0_ms"] = self.recording_t0_ms
         if self.alone_rule is not None:
@@ -558,6 +562,8 @@ class LifecycleSink:
             if isinstance(event.get("participants"), list) and event["participants"]:
                 kept = [_presence_entry(e) for e in event["participants"][:MAX_PARTICIPANTS]]
                 rec.participants = [e for e in kept if e is not None] or None
+            if isinstance(event.get("roster_complete"), bool):
+                rec.roster_complete = event["roster_complete"]
             if isinstance(event.get("recording_t0_ms"), (int, float)):
                 rec.recording_t0_ms = int(event["recording_t0_ms"])
             if event.get("alone_rule") in ALONE_RULES:

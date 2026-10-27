@@ -74,5 +74,20 @@ const T0 = 1_000_000;
   check('the report is bounded', presence.snapshot().participants?.length === MAX_PARTICIPANTS);
 }
 
+{
+  const presence = createParticipantPresence();
+  presence.markRecordingStart(T0);
+  presence.observe(['Jana Nova'], T0 + 1);
+  check('no coverage report claims nothing about completeness', presence.snapshot().roster_complete === undefined);
+  presence.observeCoverage(1, 1);
+  presence.observeCoverage(2, 2);
+  presence.observeCoverage(0, 1);
+  check('every scan naming everyone it saw is a complete roster - the bot alone with its own nameless tile included',
+    presence.snapshot().roster_complete === true);
+  presence.observeCoverage(1, 2);
+  presence.observeCoverage(2, 2);
+  check('one scan with a nameless participant makes it incomplete for good', presence.snapshot().roster_complete === false);
+}
+
 if (failed) { console.error(`\nFAIL participant-presence: ${failed} check(s) FAILED.`); process.exit(1); }
 console.log('\nPASS participant-presence: first and last sighting per person, from the recording\'s t=0.');

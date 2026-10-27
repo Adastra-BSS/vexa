@@ -120,6 +120,9 @@ const check = (name: string, cond: boolean, detail?: string) => {
   const names = presence.snapshot().participants?.map((p) => p.name);
   check('observation sink: roster-names reaches the presence tracker, junk does not',
     JSON.stringify(names) === JSON.stringify(['Jana Nova', 'Petr Svoboda']), JSON.stringify(names));
+  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 3, named: 2, bots: 0 }, Date.now());
+  check('observation sink: roster-coverage tells the presence tracker whether everyone had a name',
+    presence.snapshot().roster_complete === false, JSON.stringify(presence.snapshot()));
 }
 
 // ── The real bundle (built by build-browser-utils.mjs — turbo test depends on build) ─────────────

@@ -14,11 +14,15 @@
 
 export interface ParticipantPresenceEntry { name: string; first_seen_ms: number; last_seen_ms: number }
 
-/** What the terminal lifecycle event carries. Empty when there is no recording to place it in. */
-export interface ParticipantPresenceReport { participants?: ParticipantPresenceEntry[] }
+/** What the terminal lifecycle event carries. Empty when there is no recording to place it in.
+ *  `roster_complete` says every scan could name everyone it saw - only then is a name missing
+ *  from the voices a name nobody else can be. */
+export interface ParticipantPresenceReport { participants?: ParticipantPresenceEntry[]; roster_complete?: boolean }
 
 export interface ParticipantPresence {
   observe(names: readonly string[], tMs: number): void;
+  /** One `roster-coverage` report: participant surfaces the scan saw, and how many it named. */
+  observeCoverage(named: number, participants: number): void;
   markRecordingStart(tMs: number): void;
   snapshot(): ParticipantPresenceReport;
 }
@@ -30,6 +34,8 @@ const MAX_NAME_CHARS = 200;
 export function createParticipantPresence(): ParticipantPresence {
   const seen = new Map<string, { first: number; last: number }>();
   let t0: number | undefined;
+  let coverageReported = false;
+  let complete = true;
 
   return {
     observe(names, tMs) {
@@ -49,6 +55,13 @@ export function createParticipantPresence(): ParticipantPresence {
         }
       } catch { /* a diagnostic collector must never disturb capture */ }
     },
+    observeCoverage(named, participants) {
+      if (!Number.isFinite(named) || !Number.isFinite(participants)) return;
+      coverageReported = true;
+      // Alone, Teams shows the bot's own tile without a name label (aloneness.ts isEmptyRoom): a
+      // scan with nobody named says nothing about a participant the scan could not name.
+      if (named > 0 && participants > named) complete = false;
+    },
     markRecordingStart(tMs) {
       if (t0 === undefined && Number.isFinite(tMs)) t0 = tMs;
     },
@@ -62,7 +75,7 @@ export function createParticipantPresence(): ParticipantPresence {
           last_seen_ms: Math.max(0, entry.last - origin),
         }))
         .sort((a, b) => a.first_seen_ms - b.first_seen_ms);
-      return { participants };
+      return { participants, ...(coverageReported ? { roster_complete: complete } : {}) };
     },
   };
 }
