@@ -26,6 +26,21 @@ _BOT_LOGS_BYTE_BUDGET = 50 * 1024
 # at the same count; re-capped here so one misbehaving producer cannot bloat meeting.data. The
 # start of a meeting is kept, matching the bot, whose timeline stops growing once full.
 MAX_SPEAKER_EVENTS = 20_000
+# The bot's own cap on who-was-in-the-room entries (participant-presence.ts MAX_PARTICIPANTS).
+MAX_PARTICIPANTS = 500
+
+
+def _presence_entry(entry: Any) -> Optional[Dict[str, Any]]:
+    """One `participants` entry as stored, or None for anything that is not a named sighting."""
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("name")
+    first, last = entry.get("first_seen_ms"), entry.get("last_seen_ms")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if not isinstance(first, (int, float)) or not isinstance(last, (int, float)):
+        return None
+    return {"name": name.strip(), "first_seen_ms": int(first), "last_seen_ms": int(last)}
 
 # The bot's aloneness rules, which both complete a meeting as left_alone. Allow-listed because the
 # value is producer-supplied and lands verbatim in meeting.data.
@@ -255,6 +270,9 @@ class MeetingRecord:
     #: (kinds + counts + the backend's own detail), reported by the bot on the terminal event.
     stt_fault: Optional[Dict[str, Any]] = None
     speaker_events: Optional[List[Dict[str, Any]]] = None
+    #: Who was in the room by name, silent participants included: first and last roster sighting
+    #: in ms from the recording's t=0. Lets a consumer tell a listener from an invitee who never came.
+    participants: Optional[List[Dict[str, Any]]] = None
     recording_t0_ms: Optional[int] = None
     #: Why a left_alone bot decided it was alone: the room emptied, or it fell silent.
     alone_rule: Optional[str] = None
@@ -301,6 +319,8 @@ class MeetingRecord:
             d["stt_fault"] = dict(self.stt_fault)
         if self.speaker_events is not None:
             d["speaker_events"] = list(self.speaker_events)
+        if self.participants is not None:
+            d["participants"] = list(self.participants)
         if self.recording_t0_ms is not None:
             d["recording_t0_ms"] = self.recording_t0_ms
         if self.alone_rule is not None:
@@ -535,6 +555,9 @@ class LifecycleSink:
             # the call, from the recording alone, gets speaker names. Additive, like stt_fault.
             if isinstance(event.get("speaker_events"), list) and event["speaker_events"]:
                 rec.speaker_events = [dict(e) for e in event["speaker_events"][:MAX_SPEAKER_EVENTS] if isinstance(e, dict)]
+            if isinstance(event.get("participants"), list) and event["participants"]:
+                kept = [_presence_entry(e) for e in event["participants"][:MAX_PARTICIPANTS]]
+                rec.participants = [e for e in kept if e is not None] or None
             if isinstance(event.get("recording_t0_ms"), (int, float)):
                 rec.recording_t0_ms = int(event["recording_t0_ms"])
             if event.get("alone_rule") in ALONE_RULES:

@@ -26,7 +26,7 @@ from typing import Any, AsyncIterator, Optional, Protocol, runtime_checkable
 # key that says what was said, or who said it when, has to be named here or it outlives the purge.
 ARTIFACT_DATA_KEYS = (
     "recordings", "processed", "notes", "share_grants", "transcript_viewers",
-    "speaker_events", "recording_t0_ms",
+    "speaker_events", "participants", "recording_t0_ms",
 )
 
 

@@ -309,6 +309,36 @@ def test_a_meeting_without_a_timeline_carries_none():
     assert "recording_t0_ms" not in final["data"]
 
 
+_PRESENCE = [
+    {"name": "Jana Nova", "first_seen_ms": 0, "last_seen_ms": 3_540_000},
+    {"name": "Petr Silent", "first_seen_ms": 12_000, "last_seen_ms": 3_500_000},
+]
+
+
+def test_the_terminal_event_persists_who_was_in_the_room():
+    """Silent participants included, so a consumer can tell them from invitees who never came."""
+    terminal = {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "stopped", "participants": _PRESENCE, "recording_t0_ms": 1780000000000,
+    }
+    conforms(terminal, "LifecycleEvent")
+
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, terminal)[-1]
+
+    assert final["data"]["participants"] == _PRESENCE
+
+
+def test_malformed_presence_entries_are_dropped():
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0, "completion_reason": "stopped",
+        "participants": [_PRESENCE[0], {"name": ""}, "not a dict", {"name": "No times"}],
+    })[-1]
+
+    assert final["data"]["participants"] == [_PRESENCE[0]]
+
+
 @pytest.mark.parametrize("rule", ["empty-room", "silence"])
 def test_the_rule_that_left_the_bot_alone_is_persisted(rule):
     """Both rules complete as left_alone; only this field says whether the room emptied or fell silent."""

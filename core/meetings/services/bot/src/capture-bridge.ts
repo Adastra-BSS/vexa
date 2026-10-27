@@ -42,6 +42,7 @@ import type { BotPipeline } from './pipeline.js';
 import type { BotRecordingSink } from './recording.js';
 import type { TelemetrySink } from './ports.js';
 import type { RemoteAudioActivityTap } from './aloneness.js';
+import type { ParticipantPresence } from './participant-presence.js';
 import type { SpeakerTimeline } from './speaker-timeline.js';
 import { createTtsPlayback } from './tts-playback.js';
 
@@ -203,6 +204,8 @@ export function makeObservationSink(
   /** The aloneness tap, which needs the roster's participant count to tell an emptied room from a
    *  quiet one. Fed on every lane, unlike the two consumers above. */
   activity?: RemoteAudioActivityTap,
+  /** Who was in the room by name, for the attendance list carried on the terminal event. */
+  presence?: ParticipantPresence,
 ): { sink: (source: string, obs: unknown, tMs?: number) => void; crossed: () => number; stored: () => number } {
   let crossed = 0;
   let stored = 0;
@@ -237,6 +240,9 @@ export function makeObservationSink(
         try {
           activity?.observeRoster({ participants: payload.participants, named: payload.named, bots });
         } catch { /* never breaks capture */ }
+      }
+      if (payload.type === 'roster-names' && Array.isArray(payload.names)) {
+        try { presence?.observe(payload.names as string[], t); } catch { /* never breaks capture */ }
       }
     },
   };
@@ -706,7 +712,7 @@ export async function startCaptureBridge(
   timeline?: SpeakerTimeline,
   /** listenTeamsChat: read the Teams meeting chat for the bot's chat commands - new messages only,
    *  delivered through `onChat`. Off, nobody's chat is read. */
-  options: { listenTeamsChat?: boolean } = {},
+  options: { listenTeamsChat?: boolean; presence?: ParticipantPresence } = {},
 ): Promise<() => Promise<void>> {
   const mixed = isMixedLanePlatform(inv.platform);
   const jitsi = inv.platform === 'jitsi';
@@ -770,6 +776,7 @@ export async function startCaptureBridge(
     mixed ? (name, tMs) => pipeline.recordRosterName?.(name, tMs) : undefined,
     mixed ? (named, participants, tMs) => pipeline.recordRosterCoverage?.(named, participants, tMs) : undefined,
     activity,
+    options.presence,
   );
   // C1: the four hint hops on one periodic, cumulative counter line —
   // page-emitted lives in the page console ([TeamsSpeakers]/[JitsiSpeakers] logs);
