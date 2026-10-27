@@ -6,7 +6,9 @@
  * came, and only the bot saw the room. This keeps, per display name, the first and the last roster
  * scan that showed the person (`roster-names` observations from the page's participant scan, which
  * leaves out the bot itself, other notetakers and the chat pane), in ms from the recording's own
- * t=0 like the speaker timeline. A dropped connection and a rejoin stay one person.
+ * t=0 like the speaker timeline. The page reports the roster only when it changes, so a person is
+ * present from the report that names them until the next report that does not, and whoever is
+ * still there at the end until the snapshot. A dropped connection and a rejoin stay one person.
  *
  * Only names the page could read are here: a participant Teams renders without a name label, or
  * keeps off the visible gallery of a large meeting, is not.
@@ -31,8 +33,11 @@ export interface ParticipantPresence {
 export const MAX_PARTICIPANTS = 500;
 const MAX_NAME_CHARS = 200;
 
-export function createParticipantPresence(): ParticipantPresence {
+export function createParticipantPresence(options: { now?: () => number } = {}): ParticipantPresence {
+  const now = options.now ?? Date.now;
   const seen = new Map<string, { first: number; last: number }>();
+  // Who the last report named, and when: still present until a report says otherwise.
+  let current = new Set<string>();
   let t0: number | undefined;
   let coverageReported = false;
   let complete = true;
@@ -41,6 +46,12 @@ export function createParticipantPresence(): ParticipantPresence {
     observe(names, tMs) {
       try {
         if (!Array.isArray(names) || !Number.isFinite(tMs)) return;
+        // Everyone the previous report named was there up to this one.
+        for (const name of current) {
+          const entry = seen.get(name);
+          if (entry) entry.last = Math.max(entry.last, tMs);
+        }
+        const next = new Set<string>();
         for (const raw of names) {
           if (typeof raw !== 'string') continue;
           const name = raw.trim().slice(0, MAX_NAME_CHARS);
@@ -51,8 +62,12 @@ export function createParticipantPresence(): ParticipantPresence {
             entry.last = Math.max(entry.last, tMs);
           } else if (seen.size < MAX_PARTICIPANTS) {
             seen.set(name, { first: tMs, last: tMs });
+          } else {
+            continue;
           }
+          next.add(name);
         }
+        current = next;
       } catch { /* a diagnostic collector must never disturb capture */ }
     },
     observeCoverage(named, participants) {
@@ -68,7 +83,9 @@ export function createParticipantPresence(): ParticipantPresence {
     snapshot() {
       if (t0 === undefined) return {};
       const origin = t0;
+      const end = now();
       const participants = [...seen]
+        .map(([name, entry]) => [name, current.has(name) ? { ...entry, last: Math.max(entry.last, end) } : entry] as const)
         .map(([name, entry]) => ({
           name,
           first_seen_ms: Math.max(0, entry.first - origin),

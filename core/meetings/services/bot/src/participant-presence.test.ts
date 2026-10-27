@@ -15,18 +15,22 @@ const check = (name: string, cond: boolean, detail = '') => {
 const T0 = 1_000_000;
 
 {
-  const presence = createParticipantPresence();
+  // The page reports the roster only when it changes (dev meeting 56: a silent participant there
+  // for a minute came out as seen for one instant), so presence lasts until the next change.
+  let clock = T0 + 180_000;
+  const presence = createParticipantPresence({ now: () => clock });
   presence.markRecordingStart(T0);
   presence.observe(['Jana Nova', 'Petr Svoboda'], T0 + 1_000);
   presence.observe(['Jana Nova'], T0 + 60_000);
-  presence.observe(['Jana Nova'], T0 + 120_000);
   const { participants } = presence.snapshot();
   check('everyone seen is reported once, in order of first sighting',
     JSON.stringify(participants?.map((p) => p.name)) === JSON.stringify(['Jana Nova', 'Petr Svoboda']), JSON.stringify(participants));
-  check('someone present throughout spans first to last scan',
-    participants?.[0].first_seen_ms === 1_000 && participants?.[0].last_seen_ms === 120_000, JSON.stringify(participants?.[0]));
-  check('someone who left keeps the scan they were last seen in... and is gone from the next',
-    participants?.[1].first_seen_ms === 1_000 && participants?.[1].last_seen_ms === 1_000, JSON.stringify(participants?.[1]));
+  check('someone still there at the end was there until the report',
+    participants?.[0].first_seen_ms === 1_000 && participants?.[0].last_seen_ms === 180_000, JSON.stringify(participants?.[0]));
+  check('someone who left was there until the roster changed without them',
+    participants?.[1].first_seen_ms === 1_000 && participants?.[1].last_seen_ms === 60_000, JSON.stringify(participants?.[1]));
+  clock = T0 + 200_000;
+  check('the end is the time of the report', presence.snapshot().participants?.[0].last_seen_ms === 200_000);
 }
 
 {
@@ -35,16 +39,17 @@ const T0 = 1_000_000;
   presence.observe(['Jana Nova'], T0 + 1_000);
   presence.observe([], T0 + 5_000);
   presence.observe(['Jana Nova'], T0 + 90_000);
+  presence.observe([], T0 + 95_000);
   const { participants } = presence.snapshot();
   check('a dropped connection and a rejoin are still one person',
-    participants?.length === 1 && participants[0].first_seen_ms === 1_000 && participants[0].last_seen_ms === 90_000, JSON.stringify(participants));
+    participants?.length === 1 && participants[0].first_seen_ms === 1_000 && participants[0].last_seen_ms === 95_000, JSON.stringify(participants));
 }
 
 {
   const presence = createParticipantPresence();
   presence.observe(['Early Bird'], T0 - 30_000);
   presence.markRecordingStart(T0);
-  presence.observe(['Early Bird'], T0 + 10_000);
+  presence.observe([], T0 + 10_000);
   const { participants } = presence.snapshot();
   check('someone seen before the recording started is placed at its t=0',
     participants?.[0].first_seen_ms === 0 && participants?.[0].last_seen_ms === 10_000, JSON.stringify(participants));
@@ -62,6 +67,7 @@ const T0 = 1_000_000;
   presence.observe(['  Jana Nova  ', '', '   ', 42 as unknown as string], T0 + 1);
   presence.observe('not a list' as unknown as string[], T0 + 2);
   presence.observe(['Jana Nova'], Number.NaN);
+  presence.observe([], T0 + 1);
   const { participants } = presence.snapshot();
   check('names are trimmed and junk is ignored, never thrown',
     participants?.length === 1 && participants[0].name === 'Jana Nova' && participants[0].last_seen_ms === 1, JSON.stringify(participants));
