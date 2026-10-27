@@ -100,12 +100,14 @@ RUN cd /build && node core/meetings/services/bot/warm-hf-cache.mjs
 FROM vexa/meet-join-env:dev AS runtime
 
 # The bot's OWN runtime deps NOT in the meet-join env: PulseAudio (the speak/TTS
-# + capture audio chain), fluxbox (a WM for the X11 session), and the aws CLI —
+# + capture audio chain), fluxbox (a WM for the X11 session), the aws CLI —
 # the authenticated-bot session store (@vexa/remote-browser session-store.ts)
 # shells out to `aws s3` to restore the signed-in profile before launch and write
 # it back on clean teardown; without the binary every authenticated spawn fails
-# at session-restore. The Playwright + humanized-X11 stack (xvfb·xdotool·xclip·
-# x11vnc·websockify) comes from the base.
+# at session-restore — and ffmpeg, which VideoRecordingService spawns to grab the
+# X display (x11grab) plus the PulseAudio monitor when video capture is on. The
+# Playwright + humanized-X11 stack (xvfb·xdotool·xclip·x11vnc·websockify) comes
+# from the base.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -113,8 +115,26 @@ RUN export DEBIAN_FRONTEND=noninteractive \
        fluxbox \
        socat \
        awscli \
+       ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
-    && aws --version
+    && aws --version \
+    && ffmpeg -hide_banner -version | head -1
+
+# Google Chrome beside Playwright's Chromium, chosen per deployment with BOT_BROWSER_CHANNEL=chrome.
+# Playwright's Chromium is built without H.264 (its WebRTC video codecs are VP8/VP9/AV1 only), and
+# Teams will not negotiate participant video with it, so cameras and screen shares never reach the
+# page or the screen recording. Chrome ships H.264. It is proprietary, which ADR-0004 lists as
+# Category X: this is here to prove the codec diagnosis on a dev stack, and needs a recorded
+# exception (or an H.264-capable open build) before an image carrying it goes anywhere else.
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSL -o /tmp/google-chrome.deb \
+       https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get install -y --no-install-recommends /tmp/google-chrome.deb \
+    && rm -f /tmp/google-chrome.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && google-chrome --version
 
 # The npm CLI the Node base ships is never run here: dependencies are installed by pnpm in the
 # builder and the worker is started with plain `node`. It bundles its own node-tar, which the

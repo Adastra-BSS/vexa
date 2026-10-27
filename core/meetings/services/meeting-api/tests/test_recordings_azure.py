@@ -39,11 +39,27 @@ class _Blob:
 
 
 class _Downloader:
-    def __init__(self, data: bytes):
+    """The SDK's ``StorageStreamDownloader``: ``readall`` buffers the body, ``chunks`` hands it over
+    lazily, one network-sized piece per ``next()``. ``pulls`` records each piece as it is produced,
+    so a test can tell a lazy consumer from one that drained the stream up front."""
+
+    def __init__(self, data: bytes, *, piece: int = 64, pulls: list | None = None, block_s: float = 0.0):
         self._data = data
+        self._piece = piece
+        self._pulls = pulls if pulls is not None else []
+        self._block_s = block_s
 
     def readall(self) -> bytes:
         return self._data
+
+    def chunks(self):
+        for offset in range(0, len(self._data), self._piece):
+            if self._block_s:
+                import time
+
+                time.sleep(self._block_s)  # a piece fetched over the network, synchronously
+            self._pulls.append(offset)
+            yield self._data[offset : offset + self._piece]
 
 
 class _StubContainer:
@@ -57,6 +73,9 @@ class _StubContainer:
         self.deleted: list[str] = []
         self.range_calls: list[tuple] = []
         self.list_calls = 0
+        self.pulls: list[int] = []
+        self.piece = 64
+        self.piece_block_s = 0.0
         self._block_s = block_s
 
     def _maybe_block(self):
@@ -73,9 +92,12 @@ class _StubContainer:
     # ── the ContainerClient surface the adapter uses ──
     def upload_blob(self, name=None, data=None, overwrite=False, content_settings=None, **kw):
         self._maybe_block()
-        self.uploads.append({"name": name, "data": data, "overwrite": overwrite,
+        # The SDK accepts bytes or a readable stream; a stream is sent in blocks rather than held.
+        streamed = hasattr(data, "read")
+        body = data.read() if streamed else data
+        self.uploads.append({"name": name, "data": body, "streamed": streamed, "overwrite": overwrite,
                              "content_type": getattr(content_settings, "content_type", None)})
-        self.blobs[name] = data
+        self.blobs[name] = body
 
     def list_blobs(self, name_starts_with=None, **kw):
         self.list_calls += 1
@@ -88,10 +110,11 @@ class _StubContainer:
     def download_blob(self, name, offset=None, length=None, **kw):
         self._maybe_block()
         data = self._require(name)
+        stream = {"piece": self.piece, "pulls": self.pulls, "block_s": self.piece_block_s}
         if offset is None:
-            return _Downloader(data)
+            return _Downloader(data, **stream)
         self.range_calls.append((name, offset, length))
-        return _Downloader(data[offset : offset + length])
+        return _Downloader(data[offset : offset + length], **stream)
 
     def delete_blob(self, name, **kw):
         self._require(name)
@@ -305,3 +328,84 @@ def test_the_adapter_satisfies_the_storage_protocol():
     from meeting_api.recordings.ports import Storage
 
     assert isinstance(_StubAzure(_StubContainer()), Storage)
+
+
+# ── streaming: a recording of any length moves through without being held in memory ────────────
+
+
+async def _drain(pieces) -> list[bytes]:
+    return [piece async for piece in pieces]
+
+
+async def test_iter_range_yields_the_inclusive_window_piece_by_piece():
+    """The same INCLUSIVE ``[start, end]`` as ``get_range``, but handed over as the SDK's pieces
+    rather than one joined buffer - the joined buffer is what grows with the meeting's length."""
+    storage = _StubAzure(_StubContainer({"k": bytes(range(256))}))
+    pieces = await _drain(storage.iter_range("k", 10, 209))
+    assert b"".join(pieces) == bytes(range(10, 210))
+    assert len(pieces) > 1, "a 200-byte window over 64-byte pieces must arrive as several pieces"
+    assert storage._stub.range_calls == [("k", 10, 200)], "offset=start, length=end-start+1"
+
+
+async def test_iter_range_pulls_each_piece_only_when_asked_for():
+    """Consuming lazily is the whole point: a consumer that has taken one piece must not have
+    caused the rest of the object to be fetched into memory behind it."""
+    storage = _StubAzure(_StubContainer({"k": b"x" * 640}))
+    pieces = storage.iter_range("k", 0, 639)
+    first = await anext(pieces)
+    assert len(first) == 64
+    assert storage._stub.pulls == [0], "only the first piece may have been fetched so far"
+    await pieces.aclose()
+
+
+async def test_iter_range_does_not_block_the_event_loop():
+    """Each ``next()`` on the SDK's piece iterator is a synchronous network read. Taken on the loop,
+    a long download would stall the control plane for its whole length, a piece at a time."""
+    import asyncio
+
+    container = _StubContainer({"k": b"x" * 192})
+    container.piece_block_s = 0.1
+    storage = _StubAzure(container)
+    ticks = {"n": 0}
+    stop = {"v": False}
+
+    async def heartbeat():
+        while not stop["v"]:
+            ticks["n"] += 1
+            await asyncio.sleep(0.005)
+
+    hb = asyncio.create_task(heartbeat())
+    try:
+        body = b"".join(await _drain(storage.iter_range("k", 0, 191)))
+    finally:
+        stop["v"] = True
+        await hb
+
+    assert body == b"x" * 192
+    assert ticks["n"] >= 20, (
+        f"only {ticks['n']} heartbeats while streaming - the piece reads are running ON the event "
+        "loop instead of inside the worker thread"
+    )
+
+
+async def test_iter_range_of_a_missing_key_raises_key_error():
+    storage = _StubAzure(_StubContainer())
+    with pytest.raises(KeyError) as ei:
+        await _drain(storage.iter_range("gone", 0, 9))
+    assert "gone" in str(ei.value)
+
+
+async def test_upload_file_hands_the_sdk_a_stream_not_the_whole_body(tmp_path):
+    """A master is assembled on disk. Reading the file into one ``bytes`` before uploading would put
+    the whole recording back in memory; handing the SDK the open file lets it send blocks."""
+    path = tmp_path / "master.webm"
+    path.write_bytes(b"cluster" * 100)
+    storage = _StubAzure(_StubContainer())
+
+    await storage.upload_file("m/master.webm", str(path), content_type="audio/webm")
+
+    upload = storage._stub.uploads[-1]
+    assert upload["streamed"] is True, "the SDK must receive the open file, not its bytes"
+    assert upload["data"] == b"cluster" * 100
+    assert upload["overwrite"] is True, "a rebuilt master replaces the previous one"
+    assert upload["content_type"] == "audio/webm"

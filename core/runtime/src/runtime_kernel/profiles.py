@@ -121,6 +121,10 @@ def default_registry() -> ProfileRegistry:
     # (build_production_app → DockerBackend.ensure_worker_image).
     agent_worker_image = worker_image_for(agent_image)
     bot_resources = _bot_resources_from_env()
+    # Video capture rides here rather than in invocation.v1 because it is a DEPLOYMENT property: a
+    # bot pool sized for audio cannot absorb an h264 encode, so the operator who owns the pool must
+    # be able to switch it off without touching the control plane. RECORD_VIDEO is the switch; the
+    # rest tune the encode (VideoRecordingService reads them from its own process env).
     bot_tuning_env = {
         key: os.environ[key]
         for key in (
@@ -137,6 +141,18 @@ def default_registry() -> ProfileRegistry:
             "BOT_CHAT_HELP",
             "BOT_CHAT_LEAVE_ACK",
             "BOT_CHAT_DISCARD_ACK",
+            "BOT_BROWSER_CHANNEL",
+            "BOT_FAKE_CAMERA",
+            "RECORD_VIDEO",
+            "RECORD_SEGMENT_SECONDS",
+            "VIDEO_RESOLUTION",
+            "VIDEO_OUTPUT_HEIGHT",
+            "VIDEO_FRAMERATE",
+            "VIDEO_PRESET",
+            "VIDEO_CRF",
+            "VIDEO_AUDIO_BITRATE",
+            "VIDEO_AUDIO_SAMPLE_RATE",
+            "VIDEO_HWACCEL",
         )
         if os.environ.get(key, "").strip()
     }

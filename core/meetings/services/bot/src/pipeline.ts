@@ -472,7 +472,7 @@ export function createBotPipeline(
 }
 
 /** The post-admission subsystem stages createLivePipeline sequences (used in fault labels). */
-export type LiveStage = 'capture-start' | 'recording-start' | 'engine-start';
+export type LiveStage = 'capture-start' | 'recording-start' | 'video-start' | 'engine-start';
 
 /**
  * Serialize a thrown value for a LOG LINE (#593 A1). Prefer the stack (names the throwing frame),
@@ -492,6 +492,12 @@ export interface LivePipelineDeps {
   startCapture: () => Promise<() => Promise<void>>;
   /** Attach the page-side recording (optional); returns its teardown. Best-effort. */
   startRecording?: () => Promise<() => Promise<void>>;
+  /**
+   * Attach the server-side video capture (optional); returns its teardown. Best-effort, and kept
+   * separate from `startRecording` so a video fault degrades to an audio-only meeting instead of
+   * taking the transcript's recording down with it.
+   */
+  startVideo?: () => Promise<() => Promise<void>>;
   /** The transcription engine (the BotPipeline). Its start() failure is non-fatal + retried. */
   engine: Pipeline;
   /** Loud fault sink — which stage failed + the raw error (wired to console.error(serr) + publishFault). */
@@ -517,12 +523,13 @@ export interface LivePipelineDeps {
  * thunks to the live page.
  */
 export function createLivePipeline(deps: LivePipelineDeps): Pipeline {
-  const { startCapture, startRecording, engine, onFault } = deps;
+  const { startCapture, startRecording, startVideo, engine, onFault } = deps;
   const maxAttempts = Math.max(1, deps.retry?.attempts ?? 3);
   const delayMs = Math.max(0, deps.retry?.delayMs ?? 2000);
 
   let stopCapture: (() => Promise<void>) | null = null;
   let stopRecording: (() => Promise<void>) | null = null;
+  let stopVideo: (() => Promise<void>) | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
 
@@ -549,6 +556,13 @@ export function createLivePipeline(deps: LivePipelineDeps): Pipeline {
         try { stopRecording = await startRecording(); }
         catch (e) { onFault('recording-start', e); }
       }
+      // video-start — best-effort. An ffmpeg that will not spawn (no display, no PulseAudio sink,
+      // a bad hwaccel) leaves the meeting with its transcript and no video, which is the correct
+      // degrade: the transcript is the durable artifact.
+      if (startVideo) {
+        try { stopVideo = await startVideo(); }
+        catch (e) { onFault('video-start', e); }
+      }
       // engine-start — non-fatal degrade + bounded retry (the pyannote model load; #593 root cause).
       await tryEngineStart(1);
       // NOTHING rethrows ⇒ the orchestrator never sees a pipeline.start() throw ⇒ no self-evict.
@@ -560,6 +574,8 @@ export function createLivePipeline(deps: LivePipelineDeps): Pipeline {
       if (sc) await sc().catch(() => { /* best-effort — page may be closing */ });
       const sr = stopRecording; stopRecording = null;
       if (sr) await sr().catch(() => { /* best-effort — flush the final chunk → master assembly */ });
+      const sv = stopVideo; stopVideo = null;
+      if (sv) await sv().catch(() => { /* best-effort — flush the tail segment + the is_final marker */ });
       await engine.stop().catch(() => { /* best-effort; idempotent across double-stop */ });
     },
   };

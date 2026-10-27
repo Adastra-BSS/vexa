@@ -117,12 +117,19 @@ def _build_webm_master(chunks: Sequence[bytes]) -> bytes:
     return b"".join(chunks)
 
 
+def master_is_byte_concat(media_format: str) -> bool:
+    """Whether ``media_format``'s master is its chunks joined in seq order and nothing else. Such a
+    master can be assembled one chunk at a time without holding the recording; ``wav`` cannot,
+    because its header carries the summed PCM length of every chunk."""
+    return (media_format or "").lower() != "wav"
+
+
 def _build_recording_master(media_format: str, chunks: Sequence[bytes]) -> bytes:
     """Dispatch to the master builder by ``format`` — the twin of
     ``buildRecordingMaster``. ``wav`` -> RIFF header-merge; anything else
     (i.e. ``webm``) -> byte-concat. Pure: ALREADY-ordered chunks -> master bytes.
     """
-    if (media_format or "").lower() == "wav":
+    if not master_is_byte_concat(media_format):
         return _build_wav_master(chunks)
     return _build_webm_master(chunks)
 

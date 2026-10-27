@@ -44,6 +44,7 @@ import type { TelemetrySink } from './ports.js';
 import type { RemoteAudioActivityTap } from './aloneness.js';
 import type { SpeakerTimeline } from './speaker-timeline.js';
 import { createTtsPlayback } from './tts-playback.js';
+import { wantsVideoCapture } from './video-recording.js';
 
 /** Float32 PCM → base64 of its little-endian bytes — the EXACT codec wire payload, so a stored
  *  captured-signal.v1 frame round-trips through @vexa/capture-codec (encode→decode→same PCM). */
@@ -605,6 +606,9 @@ export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
 
   // Voice-agent gate the page reads to decide whether to keep the mic hot (production parity).
   await context.addInitScript(`window.__vexa_voice_agent_enabled = ${!!inv.voiceAgentEnabled};`);
+  if (process.env.BOT_FAKE_CAMERA === 'true') {
+    await context.addInitScript(FAKE_CAMERA_INIT_SCRIPT);
+  }
   // Inject the page-side capture bundle on every navigation (defines window.VexaBrowserUtils).
   await context.addInitScript({ path: BROWSER_UTILS_PATH }).catch(() => {
     // The bundle may be loaded by other means in some images; capture wiring degrades to the
@@ -908,7 +912,10 @@ export async function startCaptureBridge(
             }
             w.__vexaPerSpeakerAudioData(0, Array.from(pcm));
           };
-          Promise.resolve(w.VexaBrowserUtils.createMixedAudioCapture(w.__vexaMixDest.stream, meterAndForward))
+          // replay: false - the re-play exists for the extension, where capturing a tab silences it
+          // for the user. The bot has no listener, and a re-play is a second copy of the meeting in
+          // the PulseAudio sink the screen recording takes its soundtrack from, heard as an echo.
+          Promise.resolve(w.VexaBrowserUtils.createMixedAudioCapture(w.__vexaMixDest.stream, meterAndForward, { replay: false }))
             .then((cap: any) => {
               w.__vexaMixedCapture = cap;
               // THE CLOCK STARTS WHEN CAPTURE STARTS, NOT WHEN AUDIO ARRIVES.
@@ -1127,9 +1134,12 @@ export async function startCaptureBridge(
       .catch(() => { /* the helper already swallows + observes */ });
   }
 
+  const stopVideoDiagnostics = wantsVideoCapture(inv) ? startVideoDiagnostics(page) : () => { /* video off */ };
+
   // Stop fn: tear the page-side capture down on teardown (best-effort; the page may be closing).
   return async () => {
     if (countersTimer) clearInterval(countersTimer);
+    stopVideoDiagnostics();
     activity?.unavailable();
     await page.evaluate(() => {
       const w = (globalThis as any) as Record<string, any>;
@@ -1153,6 +1163,117 @@ export async function startCaptureBridge(
       try { w.__vexaGmeetSpeakers?.destroy?.(); } catch { /* best-effort */ }
     }).catch(() => { /* page already gone */ });
   };
+}
+
+/**
+ * A camera the bot never shows, so Teams treats it as a full participant (BOT_FAKE_CAMERA=true).
+ *
+ * With no camera device the bot joins through "Continue without audio or video" and Teams sets up
+ * no video with it at all, so other participants' cameras and screen shares never reach the page or
+ * the screen recording. Chromium's --use-fake-device-for-media-stream would supply a camera but
+ * replaces the microphone with a tone generator too, breaking the PulseAudio virtual_mic the speak
+ * path uses. So only the camera is faked, in the page: enumerateDevices gains one videoinput, and a
+ * getUserMedia call that asks for video gets a blank canvas track added to the real audio. The join
+ * flow still switches the camera off before joining, so not even the blank frame is sent.
+ *
+ * Runs at document-start on every frame, before Teams first queries devices.
+ */
+const FAKE_CAMERA_INIT_SCRIPT = `(() => {
+  const md = navigator.mediaDevices;
+  if (!md || md.__vexaFakeCamera) return;
+  md.__vexaFakeCamera = true;
+  const DEVICE_ID = 'vexa-fake-camera';
+  const enumerate = md.enumerateDevices.bind(md);
+  const getUserMedia = md.getUserMedia.bind(md);
+  md.enumerateDevices = async () => {
+    const devices = await enumerate();
+    if (devices.some((d) => d.kind === 'videoinput')) return devices;
+    const camera = { deviceId: DEVICE_ID, groupId: DEVICE_ID, kind: 'videoinput', label: 'Camera' };
+    camera.toJSON = () => ({ ...camera });
+    return [...devices, camera];
+  };
+  const blankVideoTrack = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 360;
+    const g = canvas.getContext('2d');
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, canvas.width, canvas.height);
+    // A canvas stream only emits a frame when the canvas is drawn on; keep drawing so the track
+    // stays live rather than stalling on its first frame.
+    const timer = setInterval(() => g.fillRect(0, 0, 1, 1), 200);
+    const track = canvas.captureStream(5).getVideoTracks()[0];
+    track.addEventListener('ended', () => clearInterval(timer));
+    const settings = track.getSettings.bind(track);
+    track.getSettings = () => ({ ...settings(), deviceId: DEVICE_ID });
+    return track;
+  };
+  md.getUserMedia = async (constraints) => {
+    if (!constraints || !constraints.video) return getUserMedia(constraints);
+    const stream = constraints.audio ? await getUserMedia({ audio: constraints.audio }) : new MediaStream();
+    stream.addTrack(blankVideoTrack());
+    return stream;
+  };
+})();`;
+
+const VIDEO_DIAG_INTERVAL_MS = 10_000;
+
+/**
+ * Log a snapshot of the INCOMING video path every 10 s as `[video-diag] {...}`. Read-only: it
+ * queries WebRTC stats and the DOM and changes nothing on the page.
+ *
+ * The screen recording shows participants' cameras and screen shares only if the bot's Teams page
+ * draws them, and on Teams it never has. Three layers can each be the reason, and each snapshot
+ * shows all three: whether video tracks were negotiated at all (`videoReceivers`), whether video
+ * packets arrive and decode (`inboundVideo`), and whether the page has a playing <video> element
+ * with real dimensions (`videoElements`). The connections come from the audio hook's registry
+ * (`__vexa_peer_connections`), so nothing patches RTCPeerConnection a second time.
+ */
+export function startVideoDiagnostics(page: Page, log: (m: string) => void = (m) => console.log(m)): () => void {
+  const timer = setInterval(() => {
+    void page.evaluate(async () => {
+      const w = (globalThis as any) as Record<string, any>;
+      const pcs: any[] = Array.isArray(w.__vexa_peer_connections) ? w.__vexa_peer_connections : [];
+      const videoReceivers: Array<Record<string, unknown>> = [];
+      const inboundVideo: Array<Record<string, unknown>> = [];
+      for (const pc of pcs) {
+        try {
+          for (const r of pc.getReceivers?.() ?? []) {
+            if (r.track?.kind === 'video') {
+              videoReceivers.push({ state: r.track.readyState, muted: r.track.muted, enabled: r.track.enabled });
+            }
+          }
+          const stats = await pc.getStats();
+          stats.forEach((s: any) => {
+            if (s.type === 'inbound-rtp' && (s.kind === 'video' || s.mediaType === 'video')) {
+              inboundVideo.push({
+                packets: s.packetsReceived, bytes: s.bytesReceived, framesReceived: s.framesReceived,
+                framesDecoded: s.framesDecoded, framesDropped: s.framesDropped, width: s.frameWidth,
+                height: s.frameHeight, fps: s.framesPerSecond, decoder: s.decoderImplementation,
+              });
+            }
+          });
+        } catch { /* a closed connection has no stats */ }
+      }
+      const videoElements = Array.from(w.document?.querySelectorAll?.('video') ?? []).map((v: any) => ({
+        width: v.videoWidth, height: v.videoHeight, readyState: v.readyState, paused: v.paused,
+        source: v.srcObject ? 'stream' : (v.currentSrc ? 'url' : 'none'),
+        shownWidth: Math.round(v.getBoundingClientRect?.().width ?? 0),
+      }));
+      // The video codecs this browser can negotiate. Teams video is H.264, which open-source Chromium
+      // builds (Playwright's included) may ship without; a list lacking video/H264 would explain a
+      // Teams call that negotiates no video, or drops when it tries.
+      const codecsOf = (caps: any): string[] =>
+        Array.from(new Set(((caps?.codecs ?? []) as any[]).map((c) => String(c.mimeType))));
+      const videoCodecs = {
+        receive: codecsOf(w.RTCRtpReceiver?.getCapabilities?.('video')),
+        send: codecsOf(w.RTCRtpSender?.getCapabilities?.('video')),
+      };
+      return { connections: pcs.length, videoCodecs, videoReceivers, inboundVideo, videoElements };
+    }).then((snapshot) => log(`[video-diag] ${JSON.stringify(snapshot)}`))
+      .catch(() => { /* page navigating or closed */ });
+  }, VIDEO_DIAG_INTERVAL_MS);
+  return () => clearInterval(timer);
 }
 
 /**

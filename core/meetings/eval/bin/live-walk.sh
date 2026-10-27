@@ -9,9 +9,10 @@
 #                 pubsub the gateway /ws fans in) and timestamp every frame.
 #   2. ws       — connect ws://$GW/ws as a browser-equivalent client, subscribe,
 #                 and log every frame (the path the dashboard actually uses).
-#   3. playback — GET /recordings/<rec>/master?type=audio -> raw_url -> bytes ->
-#                 ffprobe; nonzero on EBML/webm failure, zero on a valid webm
-#                 with an audio stream.
+#   3. playback — GET /recordings/<rec>/master?type=<t> -> raw_url -> bytes ->
+#                 ffprobe -> full decode, for each media type in MEDIA_TYPES.
+#                 audio must be webm/matroska with an audio stream; video must be
+#                 mp4 with a video stream. Each type reports its own verdict.
 #   4. regress  — a handful of non-polluting curls (auth/me, meetings list, the
 #                 stop route exists, the recording-receiver path) + a DOCUMENTED
 #                 (not run) max-bots cap test.
@@ -35,6 +36,8 @@
 #   DURATION    seconds to keep the redis tap + ws client open (default 120)
 #   STAGES      comma list to run a subset: redis,ws,playback,regression
 #               (default: all)
+#   MEDIA_TYPES comma list the playback stage validates: audio, video, or both
+#               (default: audio — a stack with video capture on wants audio,video)
 #
 # Redis access — provide EXACTLY ONE of:
 #   REDIS_CLI="redis-cli -h <host> -p <port> [-a <pass>]"   # direct redis-cli
@@ -84,6 +87,10 @@ GW_SCHEME="${GW_SCHEME:-http}"
 WS_SCHEME="${WS_SCHEME:-ws}"
 DURATION="${DURATION:-120}"
 STAGES="${STAGES:-redis,ws,playback,regression}"
+# Which media the playback stage validates. A recording carries one media file per media_type, so
+# `audio,video` walks both and reports each separately - the audio transcript path is unaffected by
+# whether a stack captures video, and a stack that does must not pass on the audio alone.
+MEDIA_TYPES="${MEDIA_TYPES:-audio}"
 
 REST_BASE="${GW_SCHEME}://${GW}"
 WS_URL="${WS_SCHEME}://${GW}/ws"
@@ -279,15 +286,37 @@ stage_playback() {
     return 0
   fi
   if ! command -v ffprobe >/dev/null 2>&1; then
-    fail "ffprobe not found (install ffmpeg) — cannot validate the webm/EBML stream."
+    fail "ffprobe not found (install ffmpeg) — cannot validate the recorded stream."
     return 0
   fi
 
-  local MASTER_URL="${REST_BASE}/recordings/${REC_ID}/master?type=audio"
+  local t
+  for t in $(printf '%s' "$MEDIA_TYPES" | tr ',' ' '); do
+    playback_one "$t"
+  done
+}
+
+# One media_type's round trip: master -> raw_url -> bytes -> ffprobe. Separate from the stage so a
+# stack capturing both walks both and each reports its own verdict; a video failure must not hide
+# behind a passing audio check, which is the whole reason they are asserted apart.
+playback_one() {
+  local MTYPE="$1"
+  # What a master of this type has to be. The audio path is MediaRecorder webm; the video path is
+  # ffmpeg's fragmented mp4, whose init segment plus fragments are byte-concatenated server-side
+  # (recording-codec.ts) - so it must probe as a real mp4, not merely as bytes that downloaded.
+  local WANT_FMT WANT_STREAM EXT
+  case "$MTYPE" in
+    audio) WANT_FMT='(webm|matroska)'; WANT_STREAM=audio; EXT=webm ;;
+    video) WANT_FMT='(mp4|mov|m4a)';   WANT_STREAM=video; EXT=mp4  ;;
+    *)     fail "unknown media type '$MTYPE' (want audio|video)"; return 0 ;;
+  esac
+  log "--- media_type=$MTYPE"
+
+  local MASTER_URL="${REST_BASE}/recordings/${REC_ID}/master?type=${MTYPE}"
   log "GET $MASTER_URL"
   local MASTER_JSON
   MASTER_JSON="$(curl -fsS -H "X-API-Key: ${TOKEN}" "$MASTER_URL" 2>/dev/null)" || {
-    fail "master fetch failed (HTTP error / not finalized). Recording may still be finalizing."
+    fail "[$MTYPE] master fetch failed (HTTP error / not finalized, or this stack captured no ${MTYPE})."
     return 0
   }
   log "master json: $MASTER_JSON"
@@ -298,7 +327,7 @@ stage_playback() {
   RAW_PATH="$(printf '%s' "$MASTER_JSON" \
     | sed -n 's/.*"raw_url"[ ]*:[ ]*"\([^"]*\)".*/\1/p')"
   if [ -z "$RAW_PATH" ] || [ "$RAW_PATH" = "null" ]; then
-    fail "master response has no raw_url (no playable media file yet)."
+    fail "[$MTYPE] master response has no raw_url (no playable media file yet)."
     return 0
   fi
 
@@ -313,35 +342,73 @@ stage_playback() {
 
   # Stream the bytes to a temp file (follow redirects), then ffprobe.
   local TMP
-  TMP="$(mktemp -t live-walk-rec.XXXXXX.webm)" || { fail "mktemp failed"; return 0; }
+  TMP="$(mktemp -t "live-walk-rec.XXXXXX.${EXT}")" || { fail "mktemp failed"; return 0; }
   trap 'rm -f "$TMP"' RETURN
   if ! curl -fsSL -H "X-API-Key: ${TOKEN}" -o "$TMP" "$RAW_URL" 2>/dev/null; then
-    fail "raw byte fetch failed: $RAW_URL"
+    fail "[$MTYPE] raw byte fetch failed: $RAW_URL"
     return 0
   fi
   local SZ; SZ="$(wc -c < "$TMP" | tr -d ' ')"
   log "downloaded ${SZ} bytes -> $TMP"
-  [ "${SZ:-0}" -gt 0 ] || { fail "downloaded 0 bytes"; return 0; }
+  [ "${SZ:-0}" -gt 0 ] || { fail "[$MTYPE] downloaded 0 bytes"; return 0; }
 
-  # ffprobe: require a webm/matroska container with at least one audio stream.
+  # ffprobe: the container must be the one this media_type produces, carrying its own stream.
   local PROBE
-  PROBE="$(ffprobe -v error -show_entries format=format_name:stream=codec_type \
+  PROBE="$(ffprobe -v error -show_entries format=format_name,duration:stream=codec_type,codec_name \
                    -of default=nw=1 "$TMP" 2>&1)"
   local PRC=$?
   log "ffprobe: $(printf '%s' "$PROBE" | tr '\n' ' ')"
   if [ "$PRC" -ne 0 ]; then
-    fail "ffprobe could not parse the stream — EBML/webm decode failure."
+    fail "[$MTYPE] ffprobe could not parse the stream — container decode failure."
     return 0
   fi
-  if ! printf '%s' "$PROBE" | grep -qiE 'format_name=.*(webm|matroska)'; then
-    fail "container is not webm/matroska: $(printf '%s' "$PROBE" | grep format_name)"
+  if ! printf '%s' "$PROBE" | grep -qiE "format_name=.*${WANT_FMT}"; then
+    fail "[$MTYPE] container is not ${WANT_FMT}: $(printf '%s' "$PROBE" | grep format_name)"
     return 0
   fi
-  if ! printf '%s' "$PROBE" | grep -qi 'codec_type=audio'; then
-    fail "no audio stream present in the master."
+  if ! printf '%s' "$PROBE" | grep -qi "codec_type=${WANT_STREAM}"; then
+    fail "[$MTYPE] no ${WANT_STREAM} stream present in the master."
     return 0
   fi
-  ok "valid webm with an audio stream (EBML parsed, codec_type=audio present)"
+
+  if ! ffmpeg -v error -i "$TMP" -f null - >/dev/null 2>&1; then
+    fail "[$MTYPE] container parses but does NOT decode cleanly."
+    return 0
+  fi
+  local DUR; DUR="$(printf '%s' "$PROBE" | sed -n 's/^duration=//p' | head -1)"
+
+  # A video master is a byte-concatenation of independently uploaded fragments, and the uploader
+  # SKIPS a fragment whose upload failed rather than stalling the queue. Such a master still parses,
+  # still decodes without an error, and still reports the full duration - because duration comes
+  # from the last fragment's timestamps, which survived. Only the frame count shows the loss: a
+  # 45s recording missing one 15s fragment decodes 300 frames where 450 were expected. Counting is
+  # therefore the only assertion here that can see a silently short recording.
+  if [ "$MTYPE" = video ] && [ -n "$DUR" ]; then
+    # The rate comes from the stream, never from a local default: it is declared in the init segment
+    # and survives a missing fragment intact, so it stays honest whatever VIDEO_FRAMERATE the
+    # deployment was built with. A default here would silently stop the check firing the moment the
+    # two disagreed.
+    local RFR FPS FRAMES EXPECT
+    RFR="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
+                   -of csv=p=0 "$TMP" 2>/dev/null)"
+    FPS="$(awk -F/ -v r="$RFR" 'BEGIN{split(r,a,"/"); if (a[2]+0>0) printf "%.4f", a[1]/a[2]}')"
+    FRAMES="$(ffprobe -v error -select_streams v:0 -count_frames \
+                      -show_entries stream=nb_read_frames -of csv=p=0 "$TMP" 2>/dev/null)"
+    if [ -z "$FPS" ]; then
+      fail "[$MTYPE] stream declares no frame rate ($RFR) — cannot tell a complete recording from a short one."
+      return 0
+    fi
+    EXPECT="$(awk -v d="$DUR" -v f="$FPS" 'BEGIN{printf "%d", d*f}')"
+    # 10% slack: the tail fragment ends mid-interval, and ffmpeg may drop a frame at a boundary.
+    if [ -n "$FRAMES" ] && [ "$EXPECT" -gt 0 ] \
+       && awk -v a="$FRAMES" -v b="$EXPECT" 'BEGIN{exit !(a < b*0.9)}'; then
+      fail "[$MTYPE] short recording: decoded $FRAMES frames, expected ~$EXPECT (${DUR}s @ ${FPS}fps) — a fragment is missing."
+      return 0
+    fi
+    ok "[$MTYPE] valid mp4, decodes clean, $FRAMES/$EXPECT frames present (${DUR}s @ ${FPS}fps)"
+    return 0
+  fi
+  ok "[$MTYPE] valid ${WANT_STREAM} master, decodes clean (${DUR:-unknown}s, $(printf '%s' "$PROBE" | grep -i codec_name | tr '\n' ' '))"
 }
 
 # ===========================================================================
