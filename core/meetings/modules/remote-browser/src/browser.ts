@@ -21,11 +21,6 @@ export interface LaunchPersistentOptions {
    *  context. Defaults to BOT_UI_LOCALE (env), else en-US. Keeps the page-level
    *  locale byte-identical to the --lang launch flag the caller passes in args. */
   locale?: string;
-  /** Playwright browser channel, e.g. 'chrome' for an installed Google Chrome. Defaults to
-   *  BOT_BROWSER_CHANNEL (env), else Playwright's bundled Chromium. Chrome is the only one of the
-   *  two with H.264, which Teams video needs (see ADR-0004 before using it outside a dev stack:
-   *  Chrome is proprietary). */
-  channel?: string;
 }
 
 export async function launchPersistentBrowser(
@@ -33,9 +28,7 @@ export async function launchPersistentBrowser(
 ): Promise<{ context: BrowserContext; page: Page }> {
   const dataDir = opts.dataDir ?? BROWSER_DATA_DIR;
   const locale = opts.locale ?? ((process.env.BOT_UI_LOCALE || '').trim() || 'en-US');
-  const channel = opts.channel ?? ((process.env.BOT_BROWSER_CHANNEL || '').trim() || undefined);
   const context = await chromium.launchPersistentContext(dataDir, {
-    ...(channel ? { channel } : {}),
     headless: opts.headless ?? false,
     ignoreDefaultArgs: ['--enable-automation'],
     args: opts.args,
