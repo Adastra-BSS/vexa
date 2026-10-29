@@ -141,7 +141,6 @@ def default_registry() -> ProfileRegistry:
             "BOT_CHAT_HELP",
             "BOT_CHAT_LEAVE_ACK",
             "BOT_CHAT_DISCARD_ACK",
-            "BOT_FAKE_CAMERA",
             "RECORD_VIDEO",
             "RECORD_SEGMENT_SECONDS",
             "VIDEO_RESOLUTION",

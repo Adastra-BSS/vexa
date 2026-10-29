@@ -606,9 +606,6 @@ export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
 
   // Voice-agent gate the page reads to decide whether to keep the mic hot (production parity).
   await context.addInitScript(`window.__vexa_voice_agent_enabled = ${!!inv.voiceAgentEnabled};`);
-  if (process.env.BOT_FAKE_CAMERA === 'true') {
-    await context.addInitScript(FAKE_CAMERA_INIT_SCRIPT);
-  }
   // Inject the page-side capture bundle on every navigation (defines window.VexaBrowserUtils).
   await context.addInitScript({ path: BROWSER_UTILS_PATH }).catch(() => {
     // The bundle may be loaded by other means in some images; capture wiring degrades to the
@@ -1164,57 +1161,6 @@ export async function startCaptureBridge(
     }).catch(() => { /* page already gone */ });
   };
 }
-
-/**
- * A camera the bot never shows, so Teams treats it as a full participant (BOT_FAKE_CAMERA=true).
- *
- * With no camera device the bot joins through "Continue without audio or video" and Teams sets up
- * no video with it at all, so other participants' cameras and screen shares never reach the page or
- * the screen recording. Chromium's --use-fake-device-for-media-stream would supply a camera but
- * replaces the microphone with a tone generator too, breaking the PulseAudio virtual_mic the speak
- * path uses. So only the camera is faked, in the page: enumerateDevices gains one videoinput, and a
- * getUserMedia call that asks for video gets a blank canvas track added to the real audio. The join
- * flow still switches the camera off before joining, so not even the blank frame is sent.
- *
- * Runs at document-start on every frame, before Teams first queries devices.
- */
-const FAKE_CAMERA_INIT_SCRIPT = `(() => {
-  const md = navigator.mediaDevices;
-  if (!md || md.__vexaFakeCamera) return;
-  md.__vexaFakeCamera = true;
-  const DEVICE_ID = 'vexa-fake-camera';
-  const enumerate = md.enumerateDevices.bind(md);
-  const getUserMedia = md.getUserMedia.bind(md);
-  md.enumerateDevices = async () => {
-    const devices = await enumerate();
-    if (devices.some((d) => d.kind === 'videoinput')) return devices;
-    const camera = { deviceId: DEVICE_ID, groupId: DEVICE_ID, kind: 'videoinput', label: 'Camera' };
-    camera.toJSON = () => ({ ...camera });
-    return [...devices, camera];
-  };
-  const blankVideoTrack = () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 360;
-    const g = canvas.getContext('2d');
-    g.fillStyle = '#000';
-    g.fillRect(0, 0, canvas.width, canvas.height);
-    // A canvas stream only emits a frame when the canvas is drawn on; keep drawing so the track
-    // stays live rather than stalling on its first frame.
-    const timer = setInterval(() => g.fillRect(0, 0, 1, 1), 200);
-    const track = canvas.captureStream(5).getVideoTracks()[0];
-    track.addEventListener('ended', () => clearInterval(timer));
-    const settings = track.getSettings.bind(track);
-    track.getSettings = () => ({ ...settings(), deviceId: DEVICE_ID });
-    return track;
-  };
-  md.getUserMedia = async (constraints) => {
-    if (!constraints || !constraints.video) return getUserMedia(constraints);
-    const stream = constraints.audio ? await getUserMedia({ audio: constraints.audio }) : new MediaStream();
-    stream.addTrack(blankVideoTrack());
-    return stream;
-  };
-})();`;
 
 const VIDEO_DIAG_INTERVAL_MS = 10_000;
 
