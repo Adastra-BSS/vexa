@@ -38,6 +38,7 @@ import { createBotRecordingSink } from './recording.js';
 import { createCaptureSignalRecorder, startBotLogSidecar, wrapTranscribeWithTap, wrapTranscriptWithSnapshot, type CaptureSignalRecorder } from './telemetry.js';
 import { uploadSignalTapes } from './signal-upload.js';
 import { createSttFaultReporter } from './stt-faults.js';
+import { createParticipantPresence } from './participant-presence.js';
 import { createSpeakerTimeline } from './speaker-timeline.js';
 import { launchBrowser, startCaptureBridge, startRecording, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
 import {
@@ -273,6 +274,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   // Who spoke when, carried out on the terminal event for the post-call transcription to name its
   // diarized voices from. Only a recorded meeting has an origin to place it in.
   const speakerTimeline = createSpeakerTimeline();
+  // Who was in the room, silent participants included, for the consumer's attendance list.
+  const presence = createParticipantPresence();
   const speakerStreamConfig = speakerStreamConfigFromEnv(env);
   const remoteAudioActivity = createRemoteAudioActivityTap();
   const aloneSilenceWindowMs = resolveAloneSilenceWindowMs(inv.automaticLeave?.everyoneLeftTimeout, env);
@@ -352,8 +355,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // each failure surfaces LOUD via onFault (console with a full-fidelity serr(e)) instead of
     // throwing into the orchestrator's leave-on-fail backstop (which would hang the bot up).
     pipeline = createLivePipeline({
-      startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, onChat, remoteAudioActivity, speakerTimeline, { listenTeamsChat: Boolean(commands) }),   // on the live meeting page
-      startRecording: rec ? () => startRecording(sess.page, inv, rec, (tMs) => speakerTimeline.markRecordingStart(tMs)) : undefined,          // MediaRecorder → recording.v1
+      startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, onChat, remoteAudioActivity, speakerTimeline, { listenTeamsChat: Boolean(commands), presence }),   // on the live meeting page
+      startRecording: rec ? () => startRecording(sess.page, inv, rec, (tMs) => { speakerTimeline.markRecordingStart(tMs); presence.markRecordingStart(tMs); }) : undefined,          // MediaRecorder → recording.v1
       engine: bp,
       onFault: (stage, e) => {
         console.error(`[bot] live-pipeline: ${stage} failed (non-fatal, bot stays seated): ${serr(e)}`);
@@ -388,9 +391,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     degraded: () => {
       const faults = sttFaults.report();
       const timeline = speakerTimeline.snapshot();
+      const attendance = presence.snapshot();
       const aloneRule = aloneness.firedRule();
-      return faults || timeline.speaker_events || aloneRule
-        ? { ...(faults ?? {}), ...timeline, ...(aloneRule ? { alone_rule: aloneRule } : {}) }
+      return faults || timeline.speaker_events || attendance.participants || aloneRule
+        ? { ...(faults ?? {}), ...timeline, ...attendance, ...(aloneRule ? { alone_rule: aloneRule } : {}) }
         : undefined;
     },
   });

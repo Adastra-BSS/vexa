@@ -660,6 +660,18 @@ export interface TeamsRosterCoverageObservation {
 }
 
 /**
+ * Who this scan could read in the room by name: every usable display name except our own and other
+ * meeting bots, sorted. Sent when the set changes, so a consumer keeps first and last sightings and
+ * can tell a participant who never spoke from an invitee who never came.
+ */
+export interface TeamsRosterNamesObservation {
+  type: 'roster-names';
+  platform: 'teams';
+  names: string[];
+  tMs: number;
+}
+
+/**
  * The module saying it has NO WAY to name anybody.
  *
  * Meeting 37 shipped a whole conversation as "Speaker A" and nothing in the run said why. The tiles
@@ -693,6 +705,7 @@ export type TeamsProducerObservation =
   | TeamsIndicatorSilentObservation
   | TeamsRosterNameObservation
   | TeamsRosterCoverageObservation
+  | TeamsRosterNamesObservation
   | TeamsNameSourcesAbsentObservation;
 
 /** Coverage + liveness of the WHO signal, for a caller that wants to surface it. */
@@ -1335,6 +1348,7 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
   const rosterSeen = new Map<string, number>();
   let scanCounter = 0;
   let lastCoverageKey = '';
+  let lastPresentKey = '';
   let lastPanelCount = 0;
   let nameSourcesAbsentAt = 0;
   function emitRosterName(name: string, nameContext?: TeamsNameCandidateContext): void {
@@ -1417,6 +1431,12 @@ export function createTeamsSpeakers(opts: TeamsSpeakersOptions): TeamsSpeakers {
     const participants = usableNames.size + unresolvedParticipantSurfaces + unresolvedPanelParticipants;
     const bots = [...usableNames].filter((n) => isBotDisplayName(n, botNameKeywords)).length;
     const coverageKey = `${usableNames.size}/${participants}/${bots}`;
+    const present = [...usableNames].filter((n) => !isBotDisplayName(n, botNameKeywords)).sort();
+    const presentKey = present.join('\n');
+    if (presentKey !== lastPresentKey) {
+      lastPresentKey = presentKey;
+      deliver({ type: 'roster-names', platform: 'teams', names: present, tMs: now() });
+    }
     if (coverageKey !== lastCoverageKey) {
       lastCoverageKey = coverageKey;
       deliver({ type: 'roster-coverage', platform: 'teams', participants, named: usableNames.size, bots, tMs: now() });

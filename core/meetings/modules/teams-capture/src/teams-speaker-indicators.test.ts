@@ -694,6 +694,23 @@ const ofType = (observations: TeamsProducerObservation[], type: string): TeamsPr
   h.watcher.destroy();
 }
 {
+  // Attend's summary header tells a silent participant from an invitee who never came: the scan
+  // reports who it can read in the room, without the bot itself and without other notetakers.
+  const tiles = [
+    makeTile('self', 'Attend Notetaker (Unverified)', { outline: true }).tile,
+    makeTile('p1', 'Adastra AI Notetaker (Unverified)', { outline: true }).tile,
+    makeTile('p2', 'Dmitry Grankin', { outline: true }).tile,
+    makeTile('p3', 'Alpha Example', { outline: false }).tile,
+  ];
+  const h = start(tiles, { selfName: 'Attend Notetaker' });
+  await settle();
+  const present = (ofType(h.observations, 'roster-names') as any[]).at(-1);
+  check('presence: the people in the room are reported, sorted, without the bot or other notetakers',
+    JSON.stringify(present?.names) === JSON.stringify(['Alpha Example', 'Dmitry Grankin']), JSON.stringify(present));
+  check('presence: one report per unchanged roster', ofType(h.observations, 'roster-names').length === 1);
+  h.watcher.destroy();
+}
+{
   const tiles = [makeTile('p1', 'Zylo Helper', { outline: true }).tile];
   const h = start(tiles, { selfName: 'Attend Notetaker', botNameKeywords: ['zylo'] });
   await settle();

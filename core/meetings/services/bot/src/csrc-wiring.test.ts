@@ -28,6 +28,7 @@ import {
   type CsrcRecord, type CsrcCapableSink, type ObservationRecord, type ObservationCapableSink,
 } from './capture-bridge.js';
 import { createRemoteAudioActivityTap } from './aloneness.js';
+import { createParticipantPresence } from './participant-presence.js';
 import type { Invocation } from './config.js';
 import type { BotPipeline } from './pipeline.js';
 
@@ -107,6 +108,21 @@ const check = (name: string, cond: boolean, detail?: string) => {
   sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 1, named: 1 }, Date.now());
   check('observation sink: a report without a bot count treats every named participant as a person',
     activity.snapshot().roomEmpty === false, JSON.stringify(activity.snapshot()));
+}
+
+{
+  // Who was in the room reaches the presence tracker, so the terminal event can say who attended.
+  const presence = createParticipantPresence();
+  presence.markRecordingStart(Date.now() - 1_000);
+  const sink = makeObservationSink('mixed', undefined, () => {}, undefined, undefined, undefined, presence);
+  sink.sink('teams-speakers', { type: 'roster-names', platform: 'teams', names: ['Jana Nova', 'Petr Svoboda'] }, Date.now());
+  sink.sink('teams-speakers', { type: 'roster-names', platform: 'teams', names: 'garbage' }, Date.now());
+  const names = presence.snapshot().participants?.map((p) => p.name);
+  check('observation sink: roster-names reaches the presence tracker, junk does not',
+    JSON.stringify(names) === JSON.stringify(['Jana Nova', 'Petr Svoboda']), JSON.stringify(names));
+  sink.sink('teams-speakers', { type: 'roster-coverage', platform: 'teams', participants: 3, named: 2, bots: 0 }, Date.now());
+  check('observation sink: roster-coverage tells the presence tracker whether everyone had a name',
+    presence.snapshot().roster_complete === false, JSON.stringify(presence.snapshot()));
 }
 
 // ── The real bundle (built by build-browser-utils.mjs — turbo test depends on build) ─────────────
