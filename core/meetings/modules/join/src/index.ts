@@ -11,6 +11,7 @@ import { joinGoogleMeeting } from "./googlemeet/join";
 import { waitForGoogleMeetingAdmission, checkForGoogleAdmissionSilent } from "./googlemeet/admission";
 import { prepareForRecording, leaveGoogleMeet } from "./googlemeet/leave";
 import { startGoogleRemovalMonitor } from "./googlemeet/removal";
+import { GOOGLE_MEET_CHAT_BUTTON_TIMEOUT_MS, sendGoogleMeetChatMessage, type GoogleMeetChatFailure, type GoogleMeetChatSendResult } from "./googlemeet/chat";
 import { joinMicrosoftTeams } from "./msteams/join";
 import { waitForTeamsMeetingAdmission, checkForTeamsAdmissionSilent } from "./msteams/admission";
 import { prepareForRecording as prepareForTeamsRecording, leaveMicrosoftTeams } from "./msteams/leave";
@@ -37,6 +38,9 @@ export { JOIN_BROWSER_ARGS, getJoinBrowserArgs };
 // ...and keep the chat pane open for the bot's chat commands.
 export { TEAMS_CHAT_BUTTON_TIMEOUT_MS, openTeamsChatPane, sendTeamsChatMessage };
 export type { TeamsChatFailure, TeamsChatOpenResult, TeamsChatSendResult };
+// Post into the Google Meet in-call chat once seated (the bot's join notice on Meet).
+export { GOOGLE_MEET_CHAT_BUTTON_TIMEOUT_MS, sendGoogleMeetChatMessage };
+export type { GoogleMeetChatFailure, GoogleMeetChatSendResult };
 // How a Teams stay ended: a participant removed the bot, or the call went away under it.
 export type { TeamsRemovalKind };
 

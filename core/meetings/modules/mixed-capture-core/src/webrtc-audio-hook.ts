@@ -74,7 +74,13 @@ export function installRemoteAudioHook(opts: WebRtcAudioHookOptions = {}): boole
 
       const audioEl = document.createElement('audio');
       audioEl.autoplay = true;
-      audioEl.muted = false;
+      // Muted: the element exists only to keep the remote track live for the consumers that read
+      // `srcObject` (the transcript's mix, the in-browser recording), none of which listen to its
+      // output. Played aloud it duplicated the page's own playback of the meeting, and the screen
+      // recording's soundtrack - taken from what the bot's browser plays - carried both copies
+      // ~230 ms apart as an echo. A muted element still counts as playing, so the track keeps
+      // flowing into Web Audio.
+      audioEl.muted = true;
       audioEl.volume = 1.0;
       audioEl.dataset.vexaInjected = 'true';
       audioEl.style.position = 'absolute';

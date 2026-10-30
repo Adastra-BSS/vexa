@@ -270,6 +270,111 @@ def test_recording_download_alias_forwards_to_raw():
     assert downstream.last["url"].endswith("/recordings/5/media/9/raw")
 
 
+# ── recording media is relayed as it arrives, never buffered whole in the gateway ───────────────
+
+_MEDIA_PIECES = [b"\x1a\x45\xdf\xa3" + b"a" * 60, b"b" * 64, b"c" * 64]
+_MEDIA = b"".join(_MEDIA_PIECES)
+_MEDIA_HEADERS = {
+    "content-length": str(len(_MEDIA)),
+    "content-range": f"bytes 0-{len(_MEDIA) - 1}/{len(_MEDIA)}",
+    "accept-ranges": "bytes",
+    "content-disposition": 'attachment; filename="master.webm"',
+}
+
+
+def _media_downstream(**kw) -> FakeDownstream:
+    return FakeDownstream(status_code=206, content_type="video/webm", stream_chunks=_MEDIA_PIECES,
+                          extra_headers=_MEDIA_HEADERS, **kw)
+
+
+@pytest.mark.parametrize("path", [
+    "/recordings/5/media/9/raw?type=video",
+    "/recordings/5/media/9/download?type=video",
+])
+def test_recording_media_is_relayed_through_the_streaming_leg_with_its_headers(path):
+    """The buffered forward held the whole master (``resp.content``) before sending a byte; a long
+    meeting's video OOM-killed the gateway mid-download, and every request in flight with it. The
+    streaming leg relays each piece as it arrives - and must carry the headers a media download
+    lives on, or a 206 loses its Content-Range and players abort."""
+    client, downstream = _client(downstream=_media_downstream())
+    r = client.get(path, headers={**AUTH, "range": "bytes=0-"})
+    assert downstream.last["via"] == "open_stream", "recording media must not take the buffered forward"
+    assert downstream.last["headers"]["range"] == "bytes=0-", "the caller's Range must reach meeting-api"
+    assert r.status_code == 206
+    assert r.content == _MEDIA
+    for name, value in _MEDIA_HEADERS.items():
+        assert r.headers[name] == value, f"{name} lost on the way out"
+    assert r.headers["content-type"].startswith("video/webm")
+
+
+def test_the_master_route_is_relayed_with_a_read_timeout_long_enough_to_build_the_master():
+    """``/master`` assembles the master before it answers. The buffered forward's 30 s timeout
+    returned a 504 for any recording whose build took longer - every long meeting on Azure."""
+    downstream = FakeDownstream(status_code=200, body={}, stream_chunks=[b'{"media_file_id": 9}'])
+    client, _ = _client(downstream=downstream)
+    r = client.get("/recordings/5/master?type=video", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json() == {"media_file_id": 9}
+    assert downstream.last["via"] == "open_stream"
+    assert downstream.last["params"] == {"type": "video"}
+    assert downstream.last["read_timeout"] >= 300
+
+
+@pytest.mark.parametrize("path", [
+    "/recordings/5/master?type=video",
+    "/recordings/5/media/9/raw?type=video",
+    "/recordings/5/media/9/download?type=video",
+])
+def test_recording_routes_bound_the_wait_for_meeting_api(path):
+    """The streaming leg alone waits forever between pieces (``read=None``, right for a quiet SSE
+    stream). A recording route must still give up on a meeting-api that has stopped answering."""
+    client, downstream = _client(downstream=_media_downstream())
+    client.get(path, headers=AUTH)
+    assert downstream.last["read_timeout"] is not None
+
+
+@pytest.mark.parametrize("error, status", [
+    (httpx.ReadTimeout("meeting-api stopped answering"), 504),
+    (httpx.ConnectError("meeting-api is not there"), 502),
+])
+def test_a_recording_route_types_an_upstream_failure_like_every_other_route(error, status):
+    client, _ = _client(downstream=_media_downstream(open_error=error))
+    r = client.get("/recordings/5/media/9/raw?type=video", headers=AUTH)
+    assert r.status_code == status
+
+
+def test_a_recording_route_still_requires_an_api_key():
+    client, downstream = _client(downstream=_media_downstream())
+    r = client.get("/recordings/5/media/9/raw?type=video")
+    assert r.status_code == 401
+    assert downstream.last is None, "an unauthenticated request must not reach meeting-api"
+
+
+async def test_the_httpx_downstream_applies_a_read_timeout_to_one_stream_only():
+    """The read timeout rides the one request, so the shared streaming client keeps ``read=None``
+    for the SSE and MCP legs that are silent for minutes by design."""
+    from gateway.adapters import HttpxDownstreamClient
+
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, content=b"ok")
+
+    stream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        timeout=httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0),
+    )
+    downstream = HttpxDownstreamClient(stream_client, stream_client=stream_client)
+    async with downstream.open_stream("GET", "http://meeting-api/recordings/5/master", read_timeout=600.0):
+        pass
+    async with downstream.open_stream("GET", "http://meeting-api/mcp"):
+        pass
+    await stream_client.aclose()
+
+    assert seen == [600.0, None]
+
+
 def test_planned_meeting_routes_require_api_key():
     client, downstream = _client()
     assert client.post("/meetings", json={"title": "x"}).status_code == 401

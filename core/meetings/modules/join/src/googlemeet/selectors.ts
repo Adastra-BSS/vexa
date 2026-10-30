@@ -474,6 +474,31 @@ export const googlePeopleButtonSelectors: string[] = [
   'button[data-tooltip*="Participants"]'
 ];
 
+// The in-call chat, as a signed-in host saw it live (Attend playground/meet_chat_probe,
+// 2026-10-29). The toolbar's chat toggle; it keeps its label whether the panel is open or not.
+export const googleChatButtonSelectors: string[] = [
+  'button[aria-label="Chat with everyone"]',
+  'button[aria-label*="Chat with everyone"]',
+];
+
+// The panel's compose box. The Send button carries the same label, so these name the textarea.
+export const googleChatInputSelectors: string[] = [
+  'textarea[aria-label="Send a message"]',
+  'textarea[placeholder="Send a message"]',
+];
+
+// The panel's Send button, beside the compose box. Disabled while the box is empty.
+export const googleChatSendButtonSelectors: string[] = [
+  'button[aria-label="Send a message"]',
+];
+
+// One rendered message - never the compose box. Each carries Meet's own id
+// (`data-message-id="spaces/<space>/messages/<id>"`), and stays in the DOM after the panel closes.
+// BROWSER CONTEXT: consumed inside page.evaluate via document.querySelectorAll.
+export const googleChatMessageSelectors: string[] = [
+  '[data-message-id]',
+];
+
 // EXECUTION-CONTEXT DECLARATION — consumed by src/shared/selector-validity.test.ts.
 // Arrays named here ship into page.evaluate and run through
 // document.querySelector, so the gate additionally CSS-parses them: a
@@ -484,5 +509,6 @@ export const googlePeopleButtonSelectors: string[] = [
 export const browserContextSelectorArrays: string[] = [
   'googleLeaveButtonMatchers',
   'googleLobbyIconGlyphSelectors',
+  'googleChatMessageSelectors',
 ];
 

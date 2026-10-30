@@ -23,11 +23,22 @@ STORAGE_PATH = "recordings/7/100/conn-abc/audio/master.wav"
 MASTER = bytes(range(256))  # 256 bytes: byte i == i
 
 
-def _client():
+class _StreamOnlyStorage(InMemoryStorage):
+    """Refuses to hand over a master as one in-memory body. Serving through it proves the route
+    relays the master piece by piece: a long meeting's master does not fit meeting-api's memory."""
+
+    async def get(self, key: str) -> bytes:
+        raise AssertionError(f"the raw route read the whole of {key} into memory")
+
+    async def get_range(self, key: str, start: int, end: int) -> bytes:
+        raise AssertionError(f"the raw route read {key}[{start}:{end}] into memory as one body")
+
+
+def _client(storage: InMemoryStorage | None = None, master: bytes = MASTER):
     """A seeded client: one finalized audio media-file whose master bytes live in storage."""
     repo = InMemoryRecordingRepo()
-    storage = InMemoryStorage()
-    storage.blobs[STORAGE_PATH] = MASTER
+    storage = storage if storage is not None else InMemoryStorage()
+    storage.blobs[STORAGE_PATH] = master
     storage.content_types[STORAGE_PATH] = "audio/wav"
     repo.seed(meeting_id=MEETING_ID, user_id=USER, session_uid="conn-abc")
     repo._meetings[MEETING_ID]["recordings"] = [
@@ -118,3 +129,34 @@ def test_end_past_eof_is_clamped():
     assert r.status_code == 206, r.text
     assert r.headers["content-range"] == f"bytes 200-{total - 1}/{total}"
     assert r.content == MASTER[200:]
+
+
+# ── the master is relayed piece by piece, never held whole ─────────────────────────────────────
+
+
+def test_a_full_download_is_relayed_without_reading_the_master_into_memory():
+    """The 200 path read the whole master and returned it as one body: meeting-api held the full
+    recording for every download, which a long meeting's video does not fit in."""
+    r = _client(_StreamOnlyStorage()).get(_URL, headers=_HDRS)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-length"] == str(len(MASTER))
+    assert r.content == MASTER
+
+
+def test_a_ranged_download_is_relayed_without_reading_the_window_into_memory():
+    """A seek asks for a window, but an open-ended one (``bytes=N-``) runs to the end of the master,
+    so the 206 path must stream too."""
+    total = len(MASTER)
+    r = _client(_StreamOnlyStorage()).get(_URL, headers={**_HDRS, "Range": "bytes=10-"})
+    assert r.status_code == 206, r.text
+    assert r.headers["content-range"] == f"bytes 10-{total - 1}/{total}"
+    assert r.headers["content-length"] == str(total - 10)
+    assert r.content == MASTER[10:]
+
+
+def test_an_empty_master_is_an_empty_200():
+    """Zero bytes has no window to read; asking storage for ``[0, -1]`` would be a backend error."""
+    r = _client(_StreamOnlyStorage(), master=b"").get(_URL, headers=_HDRS)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-length"] == "0"
+    assert r.content == b""

@@ -228,6 +228,17 @@ _DEFAULT_MCP_URL = "http://mcp:8010"
 # request; drop it at the edge and the session can never be bound. Passed through on BOTH legs.
 _MCP_HEADERS = ("mcp-session-id", "mcp-protocol-version")
 
+# Recording media (``/master`` and the master bytes) is relayed on the streaming leg: a long
+# meeting's master, buffered whole by the forward, OOM-killed the gateway mid-download. These are
+# the end-to-end headers a media download lives on - without Content-Range a 206 is malformed and
+# players abort; without Content-Length a client cannot tell a cut-off download from a short file.
+_MEDIA_HEADERS = ("content-length", "content-range", "accept-ranges", "content-disposition")
+
+# How long a recording route waits for meeting-api's head, and then between pieces. ``/master``
+# assembles the master before it answers, which for hours of video on Azure runs well past the
+# buffered forward's 30 s; ten minutes covers that and still gives up on a hung meeting-api.
+_RECORDING_READ_TIMEOUT_S = 600.0
+
 
 # Path params reach a handler URL-DECODED (Starlette resolves %3F/%23/%2E before the route sees
 # them), so interpolating one raw into a downstream URL lets a caller graft a query string, a
@@ -580,17 +591,24 @@ def create_app(
     async def delete_recording(recording_id: int, request: Request):
         return await _forward("DELETE", _meeting(f"/recordings/{recording_id}"), request)
 
+    # The recording media routes ride the streaming leg, not the buffered _forward: see
+    # _MEDIA_HEADERS and _RECORDING_READ_TIMEOUT_S for why, and what they carry.
+    async def _forward_recording(url: str, request: Request) -> Response:
+        return await _forward_stream_verbatim(
+            "GET", url, request, passthrough=_MEDIA_HEADERS, read_timeout=_RECORDING_READ_TIMEOUT_S
+        )
+
     # finalize-on-read master metadata (audio|video); the recording player fetches this, then the
-    # raw_url it returns. ?type= is preserved by _forward.
+    # raw_url it returns. ?type= is preserved by the forward.
     @app.get("/recordings/{recording_id}/master")
     async def get_recording_master(recording_id: int, request: Request):
-        return await _forward("GET", _meeting(f"/recordings/{recording_id}/master"), request)
+        return await _forward_recording(_meeting(f"/recordings/{recording_id}/master"), request)
 
     # The master byte stream the recording player loads (the master metadata's raw_url points here).
     @app.get("/recordings/{recording_id}/media/{media_file_id}/raw")
     async def get_recording_media_raw(recording_id: int, media_file_id: int, request: Request):
-        return await _forward(
-            "GET", _meeting(f"/recordings/{recording_id}/media/{media_file_id}/raw"), request
+        return await _forward_recording(
+            _meeting(f"/recordings/{recording_id}/media/{media_file_id}/raw"), request
         )
 
     # native download alias (#579 C3): the sealed api.v1 media-download path a 0.10 client calls.
@@ -598,8 +616,8 @@ def create_app(
     # to it so recording playback no longer 404s. Forwarded verbatim (Range headers preserved).
     @app.get("/recordings/{recording_id}/media/{media_file_id}/download")
     async def get_recording_media_download(recording_id: int, media_file_id: int, request: Request):
-        return await _forward(
-            "GET", _meeting(f"/recordings/{recording_id}/media/{media_file_id}/raw"), request
+        return await _forward_recording(
+            _meeting(f"/recordings/{recording_id}/media/{media_file_id}/raw"), request
         )
 
     @app.get("/meetings")
@@ -803,19 +821,27 @@ def create_app(
     # as the buffered forward types it (504 slow / 502 unreachable) — never a blanket 503. Only
     # after a head is in hand does the body iterator take over; the exit stack keeps the downstream
     # stream open for its life and closes it when the client goes away.
+    #
+    # ``passthrough`` names upstream headers a route needs relayed beyond _MCP_HEADERS, and
+    # ``read_timeout`` bounds this one stream's waits (see ``DownstreamClient.open_stream``).
     async def _forward_stream_verbatim(
-        method: str, url: str, request: Request, *, api_key: Optional[str] = None
+        method: str, url: str, request: Request, *, api_key: Optional[str] = None,
+        passthrough: tuple[str, ...] = (), read_timeout: Optional[float] = None,
     ) -> Response:
         headers, error = await _authorize(method, request, api_key=api_key)
         if error is not None:
             return error
         content = await request.body()
         params = dict(request.query_params) or None
+        # Passed only when set, so a downstream that predates the parameter still opens MCP streams.
+        timeout_kw = {"read_timeout": read_timeout} if read_timeout is not None else {}
 
         stack = AsyncExitStack()
         try:
             upstream = await stack.enter_async_context(
-                downstream.open_stream(method, url, headers=headers, params=params, content=content)
+                downstream.open_stream(
+                    method, url, headers=headers, params=params, content=content, **timeout_kw
+                )
             )
         except httpx.TimeoutException:
             await stack.aclose()
@@ -841,7 +867,7 @@ def create_app(
 
         up_headers = upstream.headers
         media_type = up_headers.get("content-type") or "application/json"
-        relayed = {k: up_headers[k] for k in _MCP_HEADERS if k in up_headers}
+        relayed = {k: up_headers[k] for k in _MCP_HEADERS + passthrough if k in up_headers}
         # Never let an intermediary buffer a relayed stream into uselessness.
         relayed.setdefault("Cache-Control", "no-cache")
         relayed.setdefault("X-Accel-Buffering", "no")

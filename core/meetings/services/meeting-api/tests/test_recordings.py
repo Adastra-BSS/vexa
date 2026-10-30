@@ -182,6 +182,129 @@ async def test_finalize_master_builds_and_stamps():
     assert mf["storage_path"] == master_key
 
 
+# ── a long recording's master is assembled on disk, not in memory ──────────────────────────────
+
+
+class _UploadSpyStorage(InMemoryStorage):
+    """Records which keys were written as one in-memory body and which from a file on disk."""
+
+    def __init__(self, *, fail_file_upload: bool = False):
+        super().__init__()
+        self.whole_uploads: list[str] = []
+        self.file_uploads: list[str] = []
+        self._fail_file_upload = fail_file_upload
+
+    async def upload(self, key: str, data: bytes, *, content_type: str) -> None:
+        self.whole_uploads.append(key)
+        await super().upload(key, data, content_type=content_type)
+
+    async def upload_file(self, key: str, path: str, *, content_type: str) -> None:
+        if self._fail_file_upload:
+            raise ConnectionError("storage went away mid-upload")
+        self.file_uploads.append(key)
+        # Stored past this class's ``upload``, which would otherwise record the file as a whole body.
+        with open(path, "rb") as f:
+            await InMemoryStorage.upload(self, key, f.read(), content_type=content_type)
+
+
+async def _upload_webm_chunks(repo, storage, chunks: list[bytes]) -> int:
+    rid = None
+    for seq, data in enumerate(chunks):
+        receipt = await upload_chunk(
+            repo, storage, token_meeting_id=MEETING_ID, session_uid=SESSION_UID,
+            data=data, media_format="webm", chunk_seq=seq, is_final=False,
+        )
+        rid = receipt["recording_id"]
+    return rid
+
+
+async def test_a_webm_master_is_assembled_on_disk_and_uploaded_from_the_file():
+    """The master is the chunks joined in order, byte for byte what the golden codec builds, but it
+    reaches storage through ``upload_file`` - never as one ``bytes`` the size of the meeting."""
+    repo = InMemoryRecordingRepo()
+    repo.seed(meeting_id=MEETING_ID, user_id=USER, session_uid=SESSION_UID)
+    storage = _UploadSpyStorage()
+    chunks = [bytes([seq]) * (100 + seq) for seq in range(12)]
+    rid = await _upload_webm_chunks(repo, storage, chunks)
+
+    master_key = await finalize_master(repo, storage, meeting_id=MEETING_ID, recording_id=rid)
+
+    assert master_key.endswith("/audio/master.webm")
+    assert storage.blobs[master_key] == build_recording_master(chunks, "webm")
+    assert storage.file_uploads == [master_key]
+    assert master_key not in storage.whole_uploads, "the master must not be uploaded as one in-memory body"
+    assert storage.content_types[master_key] == "video/webm"
+
+
+async def test_assembling_a_webm_master_does_not_hold_the_recording_in_memory():
+    """The defect behind the OOM kills: every chunk read into a list, then joined into a second
+    copy, so memory grew at about twice the recording. Assembled chunk by chunk, the peak stays near
+    one chunk however many there are."""
+    import tracemalloc
+
+    repo = InMemoryRecordingRepo()
+    repo.seed(meeting_id=MEETING_ID, user_id=USER, session_uid=SESSION_UID)
+    storage = _UploadSpyStorage()
+    chunk_bytes = 256 * 1024
+    rid = await _upload_webm_chunks(repo, storage, [bytes([seq]) * chunk_bytes for seq in range(40)])
+
+    # The fake's upload_file reads the file back into the dict, which is the fake's own storage
+    # rather than the code under test, so the measurement ends where the upload begins.
+    measured: dict[str, int] = {}
+
+    async def store_without_measuring(key, path, *, content_type):
+        measured["peak"] = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        await InMemoryStorage.upload_file(storage, key, path, content_type=content_type)
+
+    storage.upload_file = store_without_measuring
+    tracemalloc.start()
+    try:
+        await finalize_master(repo, storage, meeting_id=MEETING_ID, recording_id=rid)
+        if tracemalloc.is_tracing():
+            measured["peak"] = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    recording_bytes = 40 * chunk_bytes
+    assert measured["peak"] < recording_bytes / 4, (
+        f"peak {measured['peak']} bytes while assembling a {recording_bytes}-byte recording"
+    )
+    master = next(k for k in storage.blobs if k.endswith("/master.webm"))
+    assert len(storage.blobs[master]) == recording_bytes
+
+
+async def test_a_failed_master_upload_leaves_no_temp_file_and_stamps_nothing(tmp_path, monkeypatch):
+    """A master that never reached storage must not be pointed at, and the multi-hundred-megabyte
+    file it was assembled in must not be left behind on the pod's disk."""
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    repo = InMemoryRecordingRepo()
+    repo.seed(meeting_id=MEETING_ID, user_id=USER, session_uid=SESSION_UID)
+    storage = _UploadSpyStorage(fail_file_upload=True)
+    rid = await _upload_webm_chunks(repo, storage, [b"a" * 100, b"b" * 100])
+    chunk_path = (await repo.get_recordings(MEETING_ID))[0]["media_files"][0]["storage_path"]
+
+    with pytest.raises(ConnectionError):
+        await finalize_master(repo, storage, meeting_id=MEETING_ID, recording_id=rid)
+
+    mf = (await repo.get_recordings(MEETING_ID))[0]["media_files"][0]
+    assert mf["storage_path"] == chunk_path
+    assert not mf.get("is_final")
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_successful_master_build_leaves_no_temp_file(tmp_path, monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    repo, storage = _seeded()
+    rid = await _upload_webm_chunks(repo, storage, [b"a" * 100, b"b" * 100])
+    await finalize_master(repo, storage, meeting_id=MEETING_ID, recording_id=rid)
+    assert list(tmp_path.iterdir()) == []
+
+
 async def test_upload_before_session_is_pending():
     repo, storage = _seeded()
     receipt = await upload_chunk(
@@ -612,6 +735,108 @@ async def test_s3_storage_list_paginates_past_1000_keys():
     listed = await storage.list(prefix)
     assert len(listed) == 1500, f"expected all 1500 keys across pages, got {len(listed)}"
     assert listed == sorted(keys)
+
+
+# ── streaming: a recording of any length moves through without being held in memory ────────────
+
+
+class _StreamingS3Client:
+    """A stub boto3 client: ``get_object`` returns a body that hands itself over in pieces
+    (botocore's ``StreamingBody.iter_chunks``) and records each piece as it is produced;
+    ``upload_file`` is the managed transfer that reads a file in parts."""
+
+    def __init__(self, objects: dict[str, bytes], piece: int = 64):
+        self.objects = dict(objects)
+        self.piece = piece
+        self.get_calls: list[dict] = []
+        self.pulls: list[int] = []
+        self.uploaded: list[dict] = []
+
+    def get_object(self, Bucket, Key, Range=None, **kw):
+        self.get_calls.append({"Key": Key, "Range": Range})
+        data = self.objects[Key]
+        if Range is not None:
+            start, end = (int(x) for x in Range.removeprefix("bytes=").split("-"))
+            data = data[start : end + 1]
+        outer = self
+
+        class _Body:
+            def iter_chunks(self, chunk_size=1024):
+                for offset in range(0, len(data), outer.piece):
+                    outer.pulls.append(offset)
+                    yield data[offset : offset + outer.piece]
+
+        return {"Body": _Body()}
+
+    def upload_file(self, Filename, Bucket, Key, ExtraArgs=None, **kw):
+        with open(Filename, "rb") as f:
+            self.objects[Key] = f.read()
+        self.uploaded.append({"Filename": Filename, "Key": Key, "ExtraArgs": ExtraArgs})
+
+
+def _stub_s3(client):
+    from meeting_api.recordings.adapters import S3Storage
+
+    class _Stub(S3Storage):
+        def __init__(self):
+            super().__init__(bucket="b")
+            self._stub = client
+
+        def _c(self):
+            return self._stub
+
+    return _Stub()
+
+
+async def test_s3_iter_range_passes_the_window_to_s3_and_yields_its_pieces():
+    client = _StreamingS3Client({"k": bytes(range(256))})
+    storage = _stub_s3(client)
+    pieces = [piece async for piece in storage.iter_range("k", 10, 209)]
+    assert b"".join(pieces) == bytes(range(10, 210))
+    assert len(pieces) > 1, "a 200-byte window over 64-byte pieces must arrive as several pieces"
+    assert client.get_calls == [{"Key": "k", "Range": "bytes=10-209"}], "S3's Range is inclusive"
+
+
+async def test_s3_iter_range_pulls_each_piece_only_when_asked_for():
+    client = _StreamingS3Client({"k": b"x" * 640})
+    pieces = _stub_s3(client).iter_range("k", 0, 639)
+    assert len(await anext(pieces)) == 64
+    assert client.pulls == [0], "only the first piece may have been fetched so far"
+    await pieces.aclose()
+
+
+async def test_s3_upload_file_uses_the_managed_transfer_with_the_content_type(tmp_path):
+    """``upload_file`` reads the file in parts (multipart above its threshold); ``put_object`` with
+    the file's bytes would hold the whole master in memory again."""
+    path = tmp_path / "master.webm"
+    path.write_bytes(b"cluster" * 100)
+    client = _StreamingS3Client({})
+
+    await _stub_s3(client).upload_file("m/master.webm", str(path), content_type="audio/webm")
+
+    assert client.objects["m/master.webm"] == b"cluster" * 100
+    assert client.uploaded == [
+        {"Filename": str(path), "Key": "m/master.webm", "ExtraArgs": {"ContentType": "audio/webm"}}
+    ]
+
+
+async def test_the_in_memory_storage_streams_and_uploads_files_like_the_adapters(tmp_path):
+    """The fake every recordings test runs on must honour the same two methods, or the shipped code
+    could only be exercised against a backend."""
+    storage = InMemoryStorage()
+    await storage.upload("k", bytes(range(256)), content_type="audio/webm")
+    pieces = [piece async for piece in storage.iter_range("k", 10, 209)]
+    assert b"".join(pieces) == bytes(range(10, 210))
+    assert len(pieces) > 1
+
+    path = tmp_path / "master.webm"
+    path.write_bytes(b"cluster" * 100)
+    await storage.upload_file("m/master.webm", str(path), content_type="audio/webm")
+    assert storage.blobs["m/master.webm"] == b"cluster" * 100
+    assert storage.content_types["m/master.webm"] == "audio/webm"
+
+    with pytest.raises(KeyError):
+        [piece async for piece in storage.iter_range("gone", 0, 9)]
 
 
 def test_a_persisted_path_outside_the_owners_namespace_is_never_deleted():
