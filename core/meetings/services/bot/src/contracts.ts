@@ -50,6 +50,12 @@ export interface LifecycleEvent {
   bot_logs?: string[];
   bot_resources?: { peak_memory_bytes?: number; cpu_usage_usec?: number; [k: string]: unknown };
   speaker_events?: unknown[];
+  /** Who was in the room by name, first and last roster sighting in ms from the recording's t=0
+   *  (`participant-presence.ts`). Additive, same liberal-ingestion rationale as `infra_fault`. */
+  participants?: { name: string; first_seen_ms: number; last_seen_ms: number }[];
+  /** Whether every roster scan named everyone it saw, so a voice left unnamed can only be one of
+   *  `participants`. Additive, same rationale. */
+  roster_complete?: boolean;
   /** Which aloneness rule ended a left_alone meeting: the room emptied, or it fell silent.
    *  Additive, same liberal-ingestion rationale as `infra_fault` below. */
   alone_rule?: 'empty-room' | 'silence';
