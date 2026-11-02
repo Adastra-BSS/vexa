@@ -246,15 +246,24 @@ export class MediaRecorderChunker implements RecordingTap {
 // createRecordingTap — the full browser recording tap (generic, all platforms)
 // ───────────────────────────────────────────────────────────────────────
 
+/** The window event @vexa/mixed-capture-core's Audio Hook fires each time it mirrors a new remote audio
+ *  track, so the mix connects it at once rather than on the next rescan. */
+export const REMOTE_AUDIO_TRACK_EVENT = "vexa:remote-audio-track";
+
 /**
- * Every on-page audio-bearing MediaStream that is CURRENTLY producing audio (has a `live` track).
- * Prefers `srcObject`; falls back to a captureStream() cached on the element (a fresh captureStream()
- * each scan would mint a new stream id, defeating the mixer's dedup and leaking source nodes). Deduped
- * downstream by stream id. Platform-agnostic — a recording grabs every audio element on the page.
+ * Every LIVE remote audio track on the page, from every audio/video element. Prefers `srcObject`; falls
+ * back to a captureStream() cached on the element (a fresh captureStream() each scan would mint new
+ * tracks, defeating the mixer's dedup and leaking source nodes). Platform-agnostic - a recording grabs
+ * every audio element on the page.
+ *
+ * Tracks, not streams: one MediaStream can carry several participants' tracks (Teams puts them in one),
+ * and a MediaStreamAudioSourceNode plays only ONE track of the stream it is given. Mixing per stream is
+ * how a live Teams test recorded the organizer and silently dropped the other speaker (Attend dev,
+ * 2026-10-30).
  */
-function collectAudioStreams(): MediaStream[] {
+function collectAudioTracks(): MediaStreamTrack[] {
   const els = Array.from(document.querySelectorAll("audio, video")) as any[];
-  const out: MediaStream[] = [];
+  const out = new Map<string, MediaStreamTrack>();
   for (const el of els) {
     try {
       let s: MediaStream | null = el.srcObject instanceof MediaStream ? el.srcObject : null;
@@ -265,34 +274,35 @@ function collectAudioStreams(): MediaStream[] {
           typeof el.mozCaptureStream === "function" ? el.mozCaptureStream() : null;
         if (cap instanceof MediaStream) { el.__vexaRecCapStream = cap; s = cap; }
       }
-      // Only LIVE audio: an element lingering with an ENDED track must not re-enter the mix (it would
+      // Only LIVE tracks: an element lingering with an ENDED track must not re-enter the mix (it would
       // reconnect a dead source every scan and oscillate against the prune below).
-      if (s && s.getAudioTracks().some((t) => t.readyState === "live")) out.push(s);
+      for (const t of s?.getAudioTracks() ?? []) if (t.readyState === "live") out.set(t.id, t);
     } catch { /* not probeable; skip */ }
   }
-  return out;
+  return Array.from(out.values());
 }
 
 /**
- * A LIVE audio mix that FOLLOWS the meeting. One AudioContext destination that a periodic rescan keeps
- * wired to every current on-page audio stream: it connects newly-appearing streams and prunes ones whose
- * tracks have ended. Zoom/Teams deliver each participant as a separate WebRTC track and churn them
- * constantly (each new track is mirrored into a fresh injected <audio> by @vexa/mixed-capture-core's
- * hook) — so a ONE-TIME combine records silence the moment the originally-captured tracks end. Recording
- * `dest.stream` (a STABLE handle whose sources come and go underneath) keeps the mix complete for the
- * whole meeting. Full sample rate — deliberately NOT the 16 kHz transcription mix.
+ * A LIVE audio mix that FOLLOWS the meeting. One AudioContext destination that stays wired to every
+ * current remote audio track: it connects newly-appearing tracks - when the Audio Hook mirrors one, and
+ * on a 2 s rescan as a safety net - and prunes ones that have ended. Teams and Zoom churn participants'
+ * tracks (a dropped and rejoined participant arrives on a NEW track), so a ONE-TIME combine records
+ * silence the moment the originally-captured tracks end. Recording `dest.stream` (a STABLE handle whose
+ * sources come and go underneath) keeps the mix complete for the whole meeting in one continuous file.
+ * Full sample rate - deliberately NOT the 16 kHz transcription mix.
  */
 class DynamicAudioMixer {
   private ctx: AudioContext;
   private dest: MediaStreamAudioDestinationNode;
-  private sources = new Map<string, { node: MediaStreamAudioSourceNode; stream: MediaStream }>();
+  private sources = new Map<string, { node: MediaStreamAudioSourceNode; track: MediaStreamTrack }>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  /** Fired when the live-source count falls to 0 (all participant tracks ended — the meeting is
+  private onTrackMirrored = () => { try { this.scan(); } catch { /* the event path must never throw */ } };
+  /** Fired when the live-source count falls to 0 (all participant tracks ended - the meeting is
    *  closing). The recording host uses it to flush the recorder's buffered tail before the page dies. */
   private onEmpty: (() => void) | null;
 
   constructor(onEmpty?: () => void) {
-    this.ctx = new AudioContext();   // default (full) sample rate — NOT the 16 kHz transcription mix
+    this.ctx = new AudioContext();   // default (full) sample rate - NOT the 16 kHz transcription mix
     this.ctx.resume?.();
     this.dest = this.ctx.createMediaStreamDestination();
     this.onEmpty = onEmpty ?? null;
@@ -301,29 +311,33 @@ class DynamicAudioMixer {
   get stream(): MediaStream { return this.dest.stream; }
   get connectedCount(): number { return this.sources.size; }
 
-  /** Connect newly-seen streams; prune streams whose audio has ended. Idempotent — safe every tick. */
+  /** Connect newly-seen tracks; prune tracks that have ended. Idempotent - safe on every tick and event. */
   scan(): void {
-    const present = new Map(collectAudioStreams().map((s) => [s.id, s]));
-    for (const [id, s] of present) {
-      if (this.sources.has(id)) continue;
-      try {
-        const node = this.ctx.createMediaStreamSource(s);
-        node.connect(this.dest);
-        this.sources.set(id, { node, stream: s });
-        blog(`[record-chunker] mix +stream (${this.sources.size} live)`);
-      } catch { /* not connectable yet — retried next tick */ }
-    }
-    // Prune truly-dead streams (all tracks ended) so a long meeting's track churn doesn't accumulate
-    // source nodes. A still-live stream is KEPT even if its element left the DOM (the node holds the
-    // stream ref and still pulls audio) — presence is not the liveness signal, the track state is.
     const had = this.sources.size;
+    let changed = false;
+    for (const track of collectAudioTracks()) {
+      if (this.sources.has(track.id)) continue;
+      try {
+        const node = this.ctx.createMediaStreamSource(new MediaStream([track]));
+        node.connect(this.dest);
+        this.sources.set(track.id, { node, track });
+        changed = true;
+      } catch { /* not connectable yet - retried next tick */ }
+    }
+    // Prune ended tracks so a long meeting's churn doesn't accumulate source nodes. A still-live track is
+    // KEPT even if its element left the DOM (the node holds the track and still pulls audio) - presence
+    // is not the liveness signal, the track state is.
     for (const [id, entry] of this.sources) {
-      if (entry.stream.getAudioTracks().some((t) => t.readyState === "live")) continue;
+      if (entry.track.readyState === "live") continue;
       try { entry.node.disconnect(); } catch { /* */ }
       this.sources.delete(id);
-      blog(`[record-chunker] mix -stream (${this.sources.size} live)`);
+      changed = true;
     }
-    // Just went silent (all tracks ended → the meeting is closing) — flush the recorder's buffered tail
+    if (changed) {
+      const ids = Array.from(this.sources.keys()).map((id) => id.slice(0, 8));
+      blog(`[record-chunker] mix tracks (${ids.length} live): ${ids.join(", ") || "none"}`);
+    }
+    // Just went silent (all tracks ended -> the meeting is closing) - flush the recorder's buffered tail
     // NOW, before the platform navigates the page away and destroys the recorder mid-partial-timeslice.
     if (had > 0 && this.sources.size === 0 && this.onEmpty) { try { this.onEmpty(); } catch { /* */ } }
   }
@@ -331,10 +345,12 @@ class DynamicAudioMixer {
   start(): void {
     this.scan();
     this.timer = setInterval(() => { try { this.scan(); } catch { /* the rescan must never die */ } }, 2000);
+    try { window.addEventListener(REMOTE_AUDIO_TRACK_EVENT, this.onTrackMirrored); } catch { /* */ }
   }
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    try { window.removeEventListener(REMOTE_AUDIO_TRACK_EVENT, this.onTrackMirrored); } catch { /* */ }
     for (const { node } of this.sources.values()) { try { node.disconnect(); } catch { /* */ } }
     this.sources.clear();
     try { void this.ctx.close(); } catch { /* */ }
