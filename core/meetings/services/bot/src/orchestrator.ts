@@ -198,7 +198,7 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
   // event carries `discarded` so meeting-api deletes what the meeting left behind. Once set it stays:
   // a later leave or timeout still ends a discarded meeting.
   let discarded: NonNullable<LifecycleEvent['discarded']> | null = null;
-  function discard(trigger: 'command' | 'removed', reason: CompletionReason = 'stopped'): void {
+  function discard(trigger: 'command', reason: CompletionReason = 'stopped'): void {
     if (discarded) return;
     discarded = { at: eventTime(), trigger };
     deps.recording?.abort?.(recordingKey);
@@ -322,11 +322,9 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
     }
     // After capture started, not before: the notice says the meeting IS being recorded.
     if (deps.notice) void deps.notice.post().catch(() => { /* the notice reports its own failure */ });
-    // A participant removing the bot is an objection (discard); any other ending keeps the recording.
-    const stopRemoval = deps.join.onRemoval((kind) => {
-      if (kind === 'removed_by_participant') discard('removed', 'evicted');
-      else signalEnd?.('evicted');
-    });
+    // A participant removing the bot ends the call like any other ending: the recording is kept and
+    // summarized. Only the `attend discard` command discards it.
+    const stopRemoval = deps.join.onRemoval(() => signalEnd?.('evicted'));
     const stopAloneness = deps.aloneness.onAlone(() => signalEnd?.('left_alone'));
     const cap = opts.maxActiveMs && opts.maxActiveMs > 0
       ? setTimeout(() => signalEnd?.('max_bot_time_exceeded'), opts.maxActiveMs)

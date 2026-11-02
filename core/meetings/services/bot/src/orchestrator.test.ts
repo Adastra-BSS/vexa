@@ -249,10 +249,10 @@ async function main(): Promise<void> {
     const runP = o.run();
     setTimeout(() => fireRemoval('removed_by_participant'), 5);
     await runP;
-    const terminal = last(lc.events) as LifecycleEvent & { discarded?: { trigger: string } };
+    const terminal = last(lc.events) as LifecycleEvent & { discarded?: unknown };
     check('removed by a participant: completed(evicted)', terminal.completion_reason === 'evicted', JSON.stringify(terminal));
-    check('removed by a participant: discarded {trigger: removed}', terminal.discarded?.trigger === 'removed', JSON.stringify(terminal));
-    check('removed by a participant: the recording is aborted', recording.calls.some((c) => c.startsWith('abort')) && !recording.calls.some((c) => c.startsWith('close')), JSON.stringify(recording.calls));
+    check('removed by a participant: not discarded', terminal.discarded === undefined && o.isDiscarded() === false, JSON.stringify(terminal));
+    check('removed by a participant: the recording is kept and closed', recording.calls.some((c) => c.startsWith('close')) && !recording.calls.some((c) => c.startsWith('abort')), JSON.stringify(recording.calls));
     check('removed by a participant: events conform', allConform(lc.events));
   }
   for (const kind of ['ended', undefined] as const) {
