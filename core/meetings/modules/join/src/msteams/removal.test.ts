@@ -96,9 +96,9 @@ const GENERIC_ALERTS = [
     false,
   );
 
-  // 5. Which ending it was. A participant removing the bot discards the recording (Attend's
-  //    objection path); every other ending keeps it, so the split must never read an ordinary end
-  //    - or a dropped connection - as a removal.
+  // 5. Which ending it was. A participant removing the bot is reported as a removal; every other
+  //    ending is not, so the split must never read an ordinary end - or a dropped connection - as
+  //    a removal.
   console.log('\n=== which ending: removed by a participant vs the call ending ===');
   const kind = async (visible: string[]) => String(await classifyTeamsRemoval(mockPage(visible)));
   for (const removed of [

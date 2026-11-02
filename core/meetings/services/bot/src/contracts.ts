@@ -68,11 +68,11 @@ export interface LifecycleEvent {
    *  meeting-api callback and/or redis). Additive; same liberal-ingestion rationale. */
   unreachable_channels?: string[];
   /** Set on the terminal event of a meeting whose recording was DISCARDED on objection - an
-   *  `attend discard` in the chat (`command`) or a participant removing the bot (`removed`).
+   *  `attend discard` in the chat (`command`). A participant removing the bot no longer discards.
    *  meeting-api deletes everything the meeting left behind and downstream consumers must not
    *  process it. Additive, same liberal-ingestion rationale as `infra_fault`; it survives the
    *  stop-overrides-reason rule that a completion_reason would not. */
-  discarded?: { at: string; trigger: 'command' | 'removed' };
+  discarded?: { at: string; trigger: 'command' };
 }
 
 /** The legal transitions — the machine the bot MUST obey (lifecycle.v1/README.md). */
