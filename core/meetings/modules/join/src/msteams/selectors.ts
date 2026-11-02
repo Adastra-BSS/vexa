@@ -93,8 +93,8 @@ export const teamsRejectionIndicators: string[] = [
 ];
 
 // A participant removed the bot from the meeting - as opposed to the call ending or the connection
-// dropping. Attend reads a removal as an objection and discards the recording, so this list must
-// hold the removal texts only. "You've been removed from this meeting" is what a removed guest sees
+// dropping. A removal is reported as its own ending, so this list must hold the removal texts only
+// and an ordinary end is never read as a removal. "You've been removed from this meeting" is what a removed guest sees
 // (Attend teams_chat_spike, 2026-10-22); "End meeting for everyone" shows none of these texts.
 export const teamsRemovedByParticipantIndicators: string[] = [
   'text="You\'ve been removed from this meeting"',
