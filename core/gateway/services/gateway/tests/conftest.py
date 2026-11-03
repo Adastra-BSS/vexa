@@ -66,8 +66,11 @@ class FakeDownstream:
     def __init__(self, status_code: int = 200, body: Optional[dict] = None,
                  content_type: str = "application/json",
                  stream_chunks: Optional[list] = None,
-                 extra_headers: Optional[dict] = None):
+                 extra_headers: Optional[dict] = None,
+                 open_error: Optional[Exception] = None):
         self.status_code = status_code
+        # raised by ``open_stream`` before any head arrives (an upstream timeout / unreachable hop)
+        self._open_error = open_error
         self._body = body if body is not None else {"ok": True}
         self._content_type = content_type
         # extra downstream response headers (e.g. Content-Range/Accept-Ranges on a 206)
@@ -81,7 +84,7 @@ class FakeDownstream:
 
     async def request(self, method, url, *, headers=None, params=None, content=None):
         self.last = {"method": method, "url": url, "headers": headers or {},
-                     "params": params, "content": content}
+                     "params": params, "content": content, "via": "request"}
         return _Resp(self.status_code, json.dumps(self._body).encode(),
                      {"content-type": self._content_type, **self._extra_headers})
 
@@ -92,12 +95,16 @@ class FakeDownstream:
             yield chunk
 
     @asynccontextmanager
-    async def open_stream(self, method, url, *, headers=None, params=None, content=None):
+    async def open_stream(self, method, url, *, headers=None, params=None, content=None,
+                          read_timeout=None):
         """The head-aware streaming forward (``ports.StreamedResponse``): status + headers first,
         then the canned chunks. Used by the relay leg (MCP), where the upstream's own verdict must
         reach the caller instead of a gateway-minted envelope."""
         self.last = {"method": method, "url": url, "headers": headers or {},
-                     "params": params, "content": content}
+                     "params": params, "content": content, "via": "open_stream",
+                     "read_timeout": read_timeout}
+        if self._open_error is not None:
+            raise self._open_error
         chunks = self._stream_chunks
 
         class _Streamed:

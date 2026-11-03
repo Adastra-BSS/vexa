@@ -17,7 +17,7 @@ fakes (an in-memory blob store + an in-memory meeting store).
 """
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+from typing import AsyncIterator, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -31,6 +31,7 @@ class Storage(Protocol):
 
       * ``get`` / ``size`` / ``get_range`` raise ``KeyError(key)`` — the same thing a dict-backed
         store raises, so the in-memory fake and the production adapters agree by construction;
+        ``iter_range`` raises it on the first piece, before any byte is handed over;
       * ``exists`` returns ``False`` (an absent object is its ANSWER, not an error);
       * ``delete`` is an idempotent no-op — the budget janitor's sweeps run on every replica (#637),
         so racing a key another replica already evicted must not abort the rest of the sweep.
@@ -68,6 +69,17 @@ class Storage(Protocol):
         ``get_object`` and Azure takes it as ``offset``/``length``, so seeking fetches only the
         requested window, not the whole object. Raises ``KeyError(key)`` when the object does not
         exist."""
+        ...
+
+    def iter_range(self, key: str, start: int, end: int) -> AsyncIterator[bytes]:
+        """The INCLUSIVE window ``[start, end]`` as a sequence of pieces, each fetched only when the
+        consumer asks for it. ``get``/``get_range`` hold the whole window in memory, which for a
+        master grows with the meeting's length; this is how a master of any size is relayed."""
+        ...
+
+    async def upload_file(self, key: str, path: str, *, content_type: str) -> None:
+        """Write the file at ``path`` to ``key``, OVERWRITING like ``upload``, without reading it into
+        memory first - the backend sends it in parts. A master is assembled on disk for that reason."""
         ...
 
     async def list_detailed(self, prefix: str) -> list[dict]:
