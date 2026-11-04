@@ -90,6 +90,9 @@ export function installRemoteAudioHook(opts: WebRtcAudioHookOptions = {}): boole
       (win.__vexaInjectedAudioElements as HTMLAudioElement[]).push(audioEl);
       (win.__vexaCapturedRemoteAudioStreams as MediaStream[]).push(stream);
       log(`[Audio Hook] mirrored remote audio track ${event.track.id.substring(0, 8)} (${win.__vexaInjectedAudioElements.length} total)`);
+      // Tells the recording mix (@vexa/record-chunker's REMOTE_AUDIO_TRACK_EVENT) to connect this track
+      // now rather than on its next rescan - a participant who rejoined is recorded from their first word.
+      try { win.dispatchEvent?.(new CustomEvent('vexa:remote-audio-track')); } catch { /* listener-less pages */ }
     } catch (e: any) {
       log(`[Audio Hook] track error: ${e?.message || e}`);
     }
