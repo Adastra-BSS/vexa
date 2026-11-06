@@ -179,6 +179,15 @@
    ]
   },
   {
+   "key": "BOT_CHAT_KEEPALIVE",
+   "class": "defaulted",
+   "default": "(unset - on)",
+   "description": "how a Teams bot listening for chat commands keeps receiving the chat in a long meeting: on (pointer nudge every minute + chat pane reopen every five minutes), nudge, refresh, or off; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
    "key": "BOT_SPEAKER_MIN_AUDIO_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",

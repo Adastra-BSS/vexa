@@ -280,6 +280,10 @@ runtime:
   chatHelp: ""
   chatLeaveAck: ""
   chatDiscardAck: ""
+  # How a bot listening for chat commands keeps receiving the chat past half an hour: "on" (or
+  # empty) nudges the pointer every minute and reopens the chat pane every five minutes; "nudge"
+  # or "refresh" runs one of them; "off" none.
+  chatKeepalive: ""
   # Requests/limits stamped onto every SPAWNED bot Pod (emitted as both requests AND limits).
   # Empty = no resources block, today's behaviour - but then a dedicated bot pool's cluster
   # autoscaler has nothing to scale on and every bot bin-packs onto one node. The memory limit

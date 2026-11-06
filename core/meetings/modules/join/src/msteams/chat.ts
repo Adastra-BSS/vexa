@@ -272,3 +272,50 @@ export async function sendTeamsChatMessage(
     if (openedPane && !options.keepOpen) await openedPane.click().catch(() => { /* best-effort: the post already counted */ });
   }
 }
+
+/**
+ * Close the chat pane and open it again, so Teams loads the conversation afresh. A guest page
+ * that has sat in a meeting for about half an hour stops being sent new chat messages, and the
+ * held-back messages show only once the page changes (Attend dev meeting 69, 2026-11-05: none
+ * reached the bot after minute 3, then they appeared the moment it clicked Leave at minute 33).
+ * Never throws.
+ */
+export async function refreshTeamsChatPane(page: ChatPage | Page, options: TeamsChatSendOptions = {}): Promise<TeamsChatOpenResult> {
+  const chatPage = page as ChatPage;
+  const { inputTimeoutMs = 5000, pollMs = 250 } = options;
+  try {
+    if (await firstVisible(chatPage, teamsChatInputSelectors)) {
+      const button = await firstVisible(chatPage, teamsChatButtonSelectors);
+      if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
+      await button.locator.click();
+      await waitFor(async () => !(await firstVisible(chatPage, teamsChatInputSelectors)), inputTimeoutMs, pollMs, chatPage);
+    }
+    const opened = await openPane(chatPage, { ...options, buttonTimeoutMs: options.buttonTimeoutMs ?? 10_000 });
+    return paneFailed(opened) ? failure(opened) : { ok: true };
+  } catch (e: any) {
+    return { ok: false, reason: "error", detail: String(e?.message || e).slice(0, 200) };
+  }
+}
+
+/** The part of a Playwright Page a pointer nudge uses. */
+export interface PointerPage {
+  mouse: { move(x: number, y: number, options?: { steps?: number }): Promise<void> };
+  viewportSize(): { width: number; height: number } | null;
+}
+
+/**
+ * Move the pointer a few pixels over the meeting stage, as a person's hand on the mouse does.
+ * Teams treats a page with no input as idle; `step` alternates the position so every nudge is a
+ * real move. Never throws.
+ */
+export async function nudgeTeamsPointer(page: PointerPage | Page, step: number): Promise<boolean> {
+  try {
+    const size = (page as PointerPage).viewportSize() ?? { width: 1280, height: 720 };
+    const x = Math.round(size.width * 0.3) + (step % 2 ? 6 : 0);
+    const y = Math.round(size.height * 0.5) + (step % 2 ? 4 : 0);
+    await (page as PointerPage).mouse.move(x, y, { steps: 3 });
+    return true;
+  } catch {
+    return false;
+  }
+}

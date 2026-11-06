@@ -200,6 +200,27 @@ check('container selectors fall back to body', teamsMeetingContainerSelectors.in
   tick();
   check('listener: the message carries Teams\' own send time', (out[2] as any)?.sentAt === '2026-10-23T07:56:29.500Z');
 
+  (list as any).isConnected = true;
+  const health = chat.health();
+  check('listener: health counts what is rendered and seen, never the words',
+    health.container === '[data-tid="chat-pane-list"]' && health.rendered === 4 && health.seen === 4
+      && health.lastNewMs !== null && health.lastNewMs < 1000 && !JSON.stringify(health).includes('attend'));
+
+  // The keepalive closes and reopens the pane: Teams mounts a fresh list holding the history and
+  // whatever it had held back. Only the held-back message is new.
+  (list as any).isConnected = false;
+  check('listener: health says so when the list is gone', chat.health().container === null && chat.health().rendered === 0);
+  const remounted = e('div', { 'data-tid': 'chat-pane-list' }, [
+    message('Priya Nair', 'attend help', '100'),
+    message('Priya Nair', 'attend help', '101'),
+    message('Priya Nair', 'attend help', '102'),
+    message('Tom Hill', 'attend help', '104'),
+  ]);
+  setDoc(e('body', {}, [remounted]));
+  tick();
+  check('listener: a remounted pane reports only the message not seen before',
+    out.length === 4 && out[3].sender === 'Tom Hill' && out[3].text === 'attend help');
+
   chat.destroy();
   g.window.setInterval = realInterval;
 }

@@ -22,8 +22,21 @@ export interface TeamsChatOptions {
   skipExisting?: boolean;
 }
 
+/** What the reader sees now, with nothing anyone wrote in it - safe to log every few seconds. */
+export interface TeamsChatHealth {
+  /** The selector the message list matched, or null while there is no list in the DOM. */
+  container: string | null;
+  /** Message rows in the list right now. */
+  rendered: number;
+  /** Distinct messages seen since the reader started, history included. */
+  seen: number;
+  /** Milliseconds since the last new message appeared, or null before the first. */
+  lastNewMs: number | null;
+}
+
 export interface TeamsChat {
   destroy(): void;
+  health(): TeamsChatHealth;
   getState(): {
     matchedContainer: string | null;
     seen: number;
@@ -75,6 +88,7 @@ export function createTeamsChat(opts: TeamsChatOptions): TeamsChat {
   const recent: TeamsChatMessage[] = [];
   let matchedContainer: string | null = null;
   let container: Element | null = null;
+  let lastNewAt: number | null = null;
 
   const firstText = (root: Element, selectors: string[]): string => {
     for (const s of selectors) {
@@ -156,6 +170,7 @@ export function createTeamsChat(opts: TeamsChatOptions): TeamsChat {
     const hash = messageKey(node, msg);
     if (seenHashes.has(hash)) return; // virtualized list re-renders the same item on scroll
     seenHashes.add(hash);
+    lastNewAt = Date.now();
     if (silent) return;
     recent.push(msg);
     if (recent.length > 30) recent.shift();
@@ -163,11 +178,15 @@ export function createTeamsChat(opts: TeamsChatOptions): TeamsChat {
     try { opts.onMessage(msg); } catch { /* never break capture */ }
   };
 
-  const scanMessages = (root: ParentNode, silent = false) => {
+  const messageNodes = (root: ParentNode): NodeListOf<Element> | null => {
     for (const sel of MESSAGE_SELECTORS) {
       const nodes = root.querySelectorAll(sel);
-      if (nodes.length) { nodes.forEach((n) => emit(n, silent)); return; }
+      if (nodes.length) return nodes;
     }
+    return null;
+  };
+  const scanMessages = (root: ParentNode, silent = false) => {
+    messageNodes(root)?.forEach((n) => emit(n, silent));
   };
   // Only the first container seen holds history; a remount after that may carry new messages.
   let historyPending = Boolean(opts.skipExisting);
@@ -201,6 +220,15 @@ export function createTeamsChat(opts: TeamsChatOptions): TeamsChat {
 
   return {
     destroy() { window.clearInterval(poll); observer.disconnect(); },
+    health() {
+      const live = container?.isConnected ? container : null;
+      return {
+        container: live ? matchedContainer : null,
+        rendered: live ? messageNodes(live)?.length ?? 0 : 0,
+        seen: seenHashes.size,
+        lastNewMs: lastNewAt === null ? null : Date.now() - lastNewAt,
+      };
+    },
     getState() {
       let sample: { sel: string; structure: string[] } | null = null;
       if (container) {

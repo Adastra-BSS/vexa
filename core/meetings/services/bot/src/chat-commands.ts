@@ -64,15 +64,20 @@ export function resolveChatCommandTexts(env: NodeJS.ProcessEnv): ChatCommandText
   };
 }
 
-/** One writer for one chat: each post waits for the one before it, and a failed post never jams
- *  the ones behind it. The join notice and the command replies share it. */
-export function serializeSends<R>(send: (text: string) => Promise<R>): (text: string) => Promise<R> {
+/** One writer for one chat: each task waits for the one before it, and a failed task never jams
+ *  the ones behind it. The join notice, the command replies and the pane refresh share it. */
+export function serialTasks(): <R>(task: () => Promise<R>) => Promise<R> {
   let tail: Promise<unknown> = Promise.resolve();
-  return (text) => {
-    const next = tail.then(() => send(text));
+  return (task) => {
+    const next = tail.then(task);
     tail = next.catch(() => undefined);
     return next;
   };
+}
+
+/** A sender whose posts run one after another (see serialTasks). */
+export function serializeSends<R>(send: (text: string) => Promise<R>, run = serialTasks()): (text: string) => Promise<R> {
+  return (text) => run(() => send(text));
 }
 
 /** The commands, or undefined when the help text is empty (commands off). */
