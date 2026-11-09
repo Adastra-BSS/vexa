@@ -236,3 +236,12 @@ def test_meeting_bot_forwards_the_chat_command_texts_verbatim(monkeypatch):
     assert env["BOT_CHAT_HELP"] == texts["BOT_CHAT_HELP"]
     assert env["BOT_CHAT_LEAVE_ACK"] == texts["BOT_CHAT_LEAVE_ACK"]
     assert "BOT_CHAT_DISCARD_ACK" not in env
+
+
+def test_meeting_bot_forwards_the_chat_keepalive_mode_when_set(monkeypatch):
+    """BOT_CHAT_KEEPALIVE reaches the bot when a deployment sets it; unset, the bot's own default
+    (on) applies."""
+    monkeypatch.delenv("BOT_CHAT_KEEPALIVE", raising=False)
+    assert "BOT_CHAT_KEEPALIVE" not in default_registry().get("meeting-bot").base_env
+    monkeypatch.setenv("BOT_CHAT_KEEPALIVE", "refresh")
+    assert default_registry().get("meeting-bot").base_env["BOT_CHAT_KEEPALIVE"] == "refresh"

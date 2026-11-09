@@ -46,9 +46,10 @@ import {
 } from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
 import { createJoinNotice, resolveJoinNotice, type JoinNotice } from './join-notice.js';
-import { createChatCommands, resolveChatCommandTexts, serializeSends, type ChatCommands } from './chat-commands.js';
+import { createChatCommands, resolveChatCommandTexts, serialTasks, serializeSends, type ChatCommands } from './chat-commands.js';
+import { resolveChatKeepalive, startChatKeepalive } from './chat-keepalive.js';
 import { botEvent } from './telemetry.js';
-import { openTeamsChatPane, sendTeamsChatMessage } from '@vexa/join';
+import { nudgeTeamsPointer, openTeamsChatPane, refreshTeamsChatPane, sendTeamsChatMessage } from '@vexa/join';
 import type {
   JoinDriver,
   Pipeline,
@@ -142,7 +143,8 @@ function voiceHandler(speak: SpeakController): (act: Act) => Promise<void> {
  * serialized sender, so a reply never interleaves with the notice.
  *
  * Returns the hook the orchestrator runs once capture is up - post the notice, then, when the
- * commands are on, make sure the pane stays open for their reader - and the commands themselves.
+ * commands are on, make sure the pane stays open for their reader and keep it receiving
+ * (chat-keepalive.ts, BOT_CHAT_KEEPALIVE) - the commands themselves, and the stop for the keepalive.
  * Teams only: no other platform has a chat sender, so a notice configured there is reported as
  * `join_notice_failed(unsupported_platform)` rather than skipped silently, and no commands run.
  */
@@ -151,11 +153,12 @@ function meetingChatFor(
   env: NodeJS.ProcessEnv,
   page: BrowserSession['page'],
   controls: { leave: () => void; discard: () => void },
-): { afterAdmission?: JoinNotice; commands?: ChatCommands } {
+): { afterAdmission?: JoinNotice; commands?: ChatCommands; stop?: () => void } {
   const teams = inv.platform === 'teams';
   const texts = resolveChatCommandTexts(env);
   const listening = teams && Boolean(texts.help);
-  const send = serializeSends((text: string) => sendTeamsChatMessage(page, text, { keepOpen: listening }));
+  const run = serialTasks();
+  const send = serializeSends((text: string) => sendTeamsChatMessage(page, text, { keepOpen: listening }), run);
   const notice = createJoinNotice({
     text: resolveJoinNotice(env),
     meetingId: inv.meeting_id,
@@ -165,6 +168,8 @@ function meetingChatFor(
     ? createChatCommands({ texts, botName: inv.botName, send, onLeave: controls.leave, onDiscard: controls.discard, meetingId: inv.meeting_id })
     : undefined;
   if (!notice && !commands) return {};
+  let stopKeepalive: (() => void) | undefined;
+  let ended = false;
   const afterAdmission: JoinNotice = {
     async post() {
       if (notice) await notice.post();
@@ -173,9 +178,22 @@ function meetingChatFor(
       const opened = await openTeamsChatPane(page);
       if (opened.ok) botEvent('chat_listening', { meeting_id: inv.meeting_id });
       else botEvent('chat_listen_failed', { meeting_id: inv.meeting_id, reason: opened.reason, ...(opened.detail ? { detail: opened.detail } : {}) });
+      if (ended) return;
+      const mode = resolveChatKeepalive(env);
+      stopKeepalive = startChatKeepalive({
+        mode,
+        nudge: (step) => nudgeTeamsPointer(page, step),
+        refresh: () => run(() => refreshTeamsChatPane(page)),
+        onRefresh: (result, duration_ms) => {
+          if (result.ok) botEvent('chat_refreshed', { meeting_id: inv.meeting_id, duration_ms });
+          else botEvent('chat_refresh_failed', { meeting_id: inv.meeting_id, reason: result.reason, duration_ms, ...(result.detail ? { detail: result.detail } : {}) });
+        },
+      });
+      if (mode.nudge || mode.refresh) botEvent('chat_keepalive', { meeting_id: inv.meeting_id, nudge: mode.nudge, refresh: mode.refresh });
     },
   };
-  return { afterAdmission, commands };
+  const stop = () => { ended = true; stopKeepalive?.(); };
+  return { afterAdmission, commands, stop };
 }
 
 /**
@@ -250,6 +268,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   let acts: ActsSource = liveActs;
   let notice: JoinNotice | undefined;
   let commands: ChatCommands | undefined;
+  let stopChat: (() => void) | undefined;
   const recording = inv.recordingEnabled ? createBotRecordingSink({ inv, log: (m) => console.log(`[bot] ${m}`) }) : undefined;
   // O-TEL-1: persist the raw captured-signal.v1 stream for offline replay. Off ⇒ the tap is a
   // single undefined-check and the capture path is byte-for-byte unchanged. VEXA_CAPTURE_SIGNAL=1
@@ -345,6 +364,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     });
     notice = chat.afterAdmission;
     commands = chat.commands;
+    stopChat = chat.stop;
     // Teams chat feeds the commands and nothing else - never the transcript. Jitsi chat is still
     // published as transcript `chat` segments.
     const onChat = inv.platform === 'teams'
@@ -414,6 +434,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // teardown failure must not change the exit code). The orchestrator already stopped the pipeline
     // on a normal end; createLivePipeline.stop() is idempotent, and this also covers an early-exit
     // path that skipped the orchestrator's teardown. (#593)
+    stopChat?.();
     await pipeline.stop().catch(() => { /* best-effort */ });
     await signalRecorder?.close().catch(() => { /* best-effort */ });
     // The two teardown sidecars, written BEFORE the upload reads the directory. Both are

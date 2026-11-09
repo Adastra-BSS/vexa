@@ -1018,6 +1018,16 @@ export async function startCaptureBridge(
                 );
               }
             } catch { /* observability must never break capture */ }
+            try {
+              // Counts and ages only: what people write is never logged.
+              const ch = w.__vexaTeamsChat?.health?.();
+              if (ch) {
+                w.logBot?.(
+                  `[TeamsChat] health container=${ch.container ?? 'none'} rendered=${ch.rendered} seen=${ch.seen} `
+                  + `last_new_s=${ch.lastNewMs === null ? 'none' : Math.round(ch.lastNewMs / 1000)}`,
+                );
+              }
+            } catch { /* observability must never break capture */ }
           }, 30_000);
         }
         // Teams live captions — a SECOND, independent attribution source, read only when the

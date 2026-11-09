@@ -12,7 +12,7 @@
  */
 
 import { JSDOM } from 'jsdom';
-import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, openTeamsChatPane, pasteChatHtml, sendTeamsChatMessage, type ChatPage } from './chat';
+import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, nudgeTeamsPointer, openTeamsChatPane, pasteChatHtml, refreshTeamsChatPane, sendTeamsChatMessage, type ChatPage } from './chat';
 import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors, teamsChatSendButtonSelectors } from './selectors';
 
 let passed = 0, failed = 0;
@@ -293,6 +293,38 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     check('text only in the compose box is not rendered', chatMessageRendered({ needle: 'Attend notice first line', selectors: teamsChatMessageSelectors }), false);
     check('text in a message-list entry is rendered', chatMessageRendered({ needle: 'Someone else wrote this', selectors: teamsChatMessageSelectors }), true);
     check('an invalid selector is skipped, not thrown', chatMessageRendered({ needle: 'Someone else wrote this', selectors: ['div:has-text("x")', ...teamsChatMessageSelectors] }), true);
+  }
+
+  console.log('\n=== refreshTeamsChatPane ===');
+  {
+    const { page, actions, isPaneOpen } = fakePage({ paneOpen: true });
+    check('an open pane is closed and opened again', [await refreshTeamsChatPane(page, FAST), actions, isPaneOpen()], [{ ok: true }, ['close-pane', 'open-pane'], true]);
+  }
+  {
+    const { page, actions, isPaneOpen } = fakePage();
+    check('a closed pane is just opened', [await refreshTeamsChatPane(page, FAST), actions, isPaneOpen()], [{ ok: true }, ['open-pane'], true]);
+  }
+  {
+    const { page } = fakePage({ chatButton: 'absent' });
+    const result = await refreshTeamsChatPane(page, FAST);
+    check('no chat button -> chat_disabled', [result.ok, !result.ok && result.reason], [false, 'chat_disabled']);
+  }
+  {
+    const { page } = fakePage({ paneOpen: true, clickThrows: true });
+    const result = await refreshTeamsChatPane(page, FAST);
+    check('a detached page -> error, not a throw', [result.ok, !result.ok && result.reason], [false, 'error']);
+  }
+
+  console.log('\n=== nudgeTeamsPointer ===');
+  {
+    const moves: number[][] = [];
+    const pointer = { mouse: { async move(x: number, y: number) { moves.push([x, y]); } }, viewportSize: () => ({ width: 1000, height: 600 }) };
+    await nudgeTeamsPointer(pointer, 0);
+    await nudgeTeamsPointer(pointer, 1);
+    await nudgeTeamsPointer(pointer, 2);
+    check('consecutive nudges land on different points over the stage', moves, [[300, 300], [306, 304], [300, 300]]);
+    const broken = { mouse: { async move() { throw new Error('Target closed'); } }, viewportSize: () => null };
+    check('a closed page -> false, not a throw', await nudgeTeamsPointer(broken, 0), false);
   }
 
   console.log(`\n=== summary: ${passed} passed, ${failed} failed ===`);

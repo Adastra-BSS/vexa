@@ -10,9 +10,9 @@
  *           ─► subscribe acts ─► await end ─► leave ─► completed
  *
  * End signals while active: an acts.v1 `leave` (→ stopped), host removal (→ evicted), or a
- * timeout (→ left_alone / max_bot_time_exceeded). A discard - the chat's `attend discard` or a
- * participant removing the bot - ends it the same way, aborts the recording and marks the terminal
- * event `discarded`. Any failure short-circuits to `failed`
+ * timeout (→ left_alone / max_bot_time_exceeded). A discard - the chat's `attend discard` - aborts
+ * the recording and marks the terminal event `discarded`. A participant removing the bot ends it
+ * the same way as an acts.v1 `leave`. Any failure short-circuits to `failed`
  * with the right failure_stage + completion_reason. Every transition is guarded by
  * `canTransition` — an illegal emit is a contract violation that throws.
  */

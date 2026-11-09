@@ -137,6 +137,8 @@ def default_registry() -> ProfileRegistry:
             "BOT_CHAT_HELP",
             "BOT_CHAT_LEAVE_ACK",
             "BOT_CHAT_DISCARD_ACK",
+            # on | nudge | refresh | off - how a listening Teams bot keeps receiving the chat.
+            "BOT_CHAT_KEEPALIVE",
         )
         if os.environ.get(key, "").strip()
     }
