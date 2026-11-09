@@ -91,6 +91,16 @@ export class MediaRecorderChunker implements RecordingTap {
     return this.recorder;
   }
 
+  /** Force the recorder to emit a chunk NOW with everything buffered since the last timeslice —
+   *  without stopping. The tail-loss fix: on eviction Zoom navigates the page away (destroying the
+   *  recorder) before the next timeslice boundary, so the last partial (the final few seconds of
+   *  speech) never becomes a chunk. Flushing at the earliest end-signal (the mix going silent) turns
+   *  that partial into a real, immediately-uploaded chunk before the context dies. Idempotent + safe. */
+  flush(): void {
+    try { if (this.recorder && this.recorder.state === "recording") this.recorder.requestData(); }
+    catch (err: any) { blog(`[record-chunker] flush() requestData failed: ${err?.message || err}`); }
+  }
+
   async start(): Promise<void> {
     if (this.recorder) {
       blog("[record-chunker] start() called twice — ignoring");
@@ -236,57 +246,115 @@ export class MediaRecorderChunker implements RecordingTap {
 // createRecordingTap — the full browser recording tap (generic, all platforms)
 // ───────────────────────────────────────────────────────────────────────
 
+/** The window event @vexa/mixed-capture-core's Audio Hook fires each time it mirrors a new remote audio
+ *  track, so the mix connects it at once rather than on the next rescan. */
+export const REMOTE_AUDIO_TRACK_EVENT = "vexa:remote-audio-track";
+
 /**
- * Find active media elements that expose audio. Two-pass (strict → relaxed):
- * tiles can be paused or expose audio via captureStream() rather than a direct
- * srcObject, so the relaxed pass mirrors buildCombinedStream's fallbacks. This
- * is platform-agnostic — a recording grabs every audio element on the page.
+ * Every LIVE remote audio track on the page, from every audio/video element. Prefers `srcObject`; falls
+ * back to a captureStream() cached on the element (a fresh captureStream() each scan would mint new
+ * tracks, defeating the mixer's dedup and leaking source nodes). Platform-agnostic - a recording grabs
+ * every audio element on the page.
+ *
+ * Tracks, not streams: one MediaStream can carry several participants' tracks (Teams puts them in one),
+ * and a MediaStreamAudioSourceNode plays only ONE track of the stream it is given. Mixing per stream is
+ * how a live Teams test recorded the organizer and silently dropped the other speaker (Attend dev,
+ * 2026-10-30).
  */
-async function findMediaElements(retries = 5, delay = 2000): Promise<HTMLMediaElement[]> {
-  for (let i = 0; i < retries; i++) {
-    const all = Array.from(document.querySelectorAll("audio, video"));
-    let els = all.filter((el: any) =>
-      !el.paused && el.srcObject instanceof MediaStream && el.srcObject.getAudioTracks().length > 0
-    ) as HTMLMediaElement[];
-    if (els.length > 0) { blog(`[record-chunker] ${els.length} media elements (strict)`); return els; }
-
-    els = all.filter((el: any) => {
-      try {
-        if (el.srcObject instanceof MediaStream && el.srcObject.getAudioTracks().length > 0) return true;
-        if (typeof el.captureStream === "function" && el.captureStream()?.getAudioTracks?.().length > 0) return true;
-        if (typeof el.mozCaptureStream === "function" && el.mozCaptureStream()?.getAudioTracks?.().length > 0) return true;
-      } catch { /* not probeable; skip */ }
-      return false;
-    }) as HTMLMediaElement[];
-    if (els.length > 0) { blog(`[record-chunker] ${els.length} media elements (relaxed)`); return els; }
-
-    await new Promise((r) => setTimeout(r, delay));
+function collectAudioTracks(): MediaStreamTrack[] {
+  const els = Array.from(document.querySelectorAll("audio, video")) as any[];
+  const out = new Map<string, MediaStreamTrack>();
+  for (const el of els) {
+    try {
+      let s: MediaStream | null = el.srcObject instanceof MediaStream ? el.srcObject : null;
+      if (!s) {
+        const cap: unknown =
+          el.__vexaRecCapStream instanceof MediaStream ? el.__vexaRecCapStream :
+          typeof el.captureStream === "function" ? el.captureStream() :
+          typeof el.mozCaptureStream === "function" ? el.mozCaptureStream() : null;
+        if (cap instanceof MediaStream) { el.__vexaRecCapStream = cap; s = cap; }
+      }
+      // Only LIVE tracks: an element lingering with an ENDED track must not re-enter the mix (it would
+      // reconnect a dead source every scan and oscillate against the prune below).
+      for (const t of s?.getAudioTracks() ?? []) if (t.readyState === "live") out.set(t.id, t);
+    } catch { /* not probeable; skip */ }
   }
-  return [];
+  return Array.from(out.values());
 }
 
-/** Mix every media element's audio into one MediaStream via a destination node. */
-async function buildCombinedStream(mediaElements: HTMLMediaElement[]): Promise<MediaStream> {
-  if (mediaElements.length === 0) throw new Error("[record-chunker] no media elements to combine");
-  const ctx = new AudioContext();
-  const dest = ctx.createMediaStreamDestination();
-  let connected = 0;
-  mediaElements.forEach((element: any, index) => {
-    try {
-      const s =
-        element.srcObject ||
-        (element.captureStream && element.captureStream()) ||
-        (element.mozCaptureStream && element.mozCaptureStream());
-      if (s instanceof MediaStream && s.getAudioTracks().length > 0) {
-        ctx.createMediaStreamSource(s).connect(dest);
-        connected++;
-        blog(`[record-chunker] connected element ${index + 1}/${mediaElements.length}`);
-      }
-    } catch (e: any) { blog(`[record-chunker] could not connect element ${index + 1}: ${e?.message || e}`); }
-  });
-  if (connected === 0) throw new Error("[record-chunker] could not connect any audio streams");
-  blog(`[record-chunker] combined ${connected} streams`);
-  return dest.stream;
+/**
+ * A LIVE audio mix that FOLLOWS the meeting. One AudioContext destination that stays wired to every
+ * current remote audio track: it connects newly-appearing tracks - when the Audio Hook mirrors one, and
+ * on a 2 s rescan as a safety net - and prunes ones that have ended. Teams and Zoom churn participants'
+ * tracks (a dropped and rejoined participant arrives on a NEW track), so a ONE-TIME combine records
+ * silence the moment the originally-captured tracks end. Recording `dest.stream` (a STABLE handle whose
+ * sources come and go underneath) keeps the mix complete for the whole meeting in one continuous file.
+ * Full sample rate - deliberately NOT the 16 kHz transcription mix.
+ */
+class DynamicAudioMixer {
+  private ctx: AudioContext;
+  private dest: MediaStreamAudioDestinationNode;
+  private sources = new Map<string, { node: MediaStreamAudioSourceNode; track: MediaStreamTrack }>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private onTrackMirrored = () => { try { this.scan(); } catch { /* the event path must never throw */ } };
+  /** Fired when the live-source count falls to 0 (all participant tracks ended - the meeting is
+   *  closing). The recording host uses it to flush the recorder's buffered tail before the page dies. */
+  private onEmpty: (() => void) | null;
+
+  constructor(onEmpty?: () => void) {
+    this.ctx = new AudioContext();   // default (full) sample rate - NOT the 16 kHz transcription mix
+    this.ctx.resume?.();
+    this.dest = this.ctx.createMediaStreamDestination();
+    this.onEmpty = onEmpty ?? null;
+  }
+
+  get stream(): MediaStream { return this.dest.stream; }
+  get connectedCount(): number { return this.sources.size; }
+
+  /** Connect newly-seen tracks; prune tracks that have ended. Idempotent - safe on every tick and event. */
+  scan(): void {
+    const had = this.sources.size;
+    let changed = false;
+    for (const track of collectAudioTracks()) {
+      if (this.sources.has(track.id)) continue;
+      try {
+        const node = this.ctx.createMediaStreamSource(new MediaStream([track]));
+        node.connect(this.dest);
+        this.sources.set(track.id, { node, track });
+        changed = true;
+      } catch { /* not connectable yet - retried next tick */ }
+    }
+    // Prune ended tracks so a long meeting's churn doesn't accumulate source nodes. A still-live track is
+    // KEPT even if its element left the DOM (the node holds the track and still pulls audio) - presence
+    // is not the liveness signal, the track state is.
+    for (const [id, entry] of this.sources) {
+      if (entry.track.readyState === "live") continue;
+      try { entry.node.disconnect(); } catch { /* */ }
+      this.sources.delete(id);
+      changed = true;
+    }
+    if (changed) {
+      const ids = Array.from(this.sources.keys()).map((id) => id.slice(0, 8));
+      blog(`[record-chunker] mix tracks (${ids.length} live): ${ids.join(", ") || "none"}`);
+    }
+    // Just went silent (all tracks ended -> the meeting is closing) - flush the recorder's buffered tail
+    // NOW, before the platform navigates the page away and destroys the recorder mid-partial-timeslice.
+    if (had > 0 && this.sources.size === 0 && this.onEmpty) { try { this.onEmpty(); } catch { /* */ } }
+  }
+
+  start(): void {
+    this.scan();
+    this.timer = setInterval(() => { try { this.scan(); } catch { /* the rescan must never die */ } }, 2000);
+    try { window.addEventListener(REMOTE_AUDIO_TRACK_EVENT, this.onTrackMirrored); } catch { /* */ }
+  }
+
+  stop(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    try { window.removeEventListener(REMOTE_AUDIO_TRACK_EVENT, this.onTrackMirrored); } catch { /* */ }
+    for (const { node } of this.sources.values()) { try { node.disconnect(); } catch { /* */ } }
+    this.sources.clear();
+    try { void this.ctx.close(); } catch { /* */ }
+  }
 }
 
 /** Options for createRecordingTap — combine all audio elements then optionally override. */
@@ -307,13 +375,27 @@ export interface CreateRecordingTapOptions extends RecordingTapOptions {
  */
 export function createRecordingTap(opts: CreateRecordingTapOptions): RecordingTap {
   let chunker: MediaRecorderChunker | null = null;
+  let mixer: DynamicAudioMixer | null = null;
   return {
     async start(): Promise<void> {
       let stream = opts.stream;
       if (!stream) {
-        const els = await findMediaElements();
-        if (els.length === 0) { blog("[record-chunker] no media elements — cannot record"); return; }
-        stream = await buildCombinedStream(els);
+        // No ready stream ⇒ build a LIVE mix of the page's audio. Wait (bounded) for the first stream —
+        // post-admission the participant / injected <audio> elements appear a beat late — so the
+        // MediaRecorder's onStarted t=0 aligns with real audio; the rescan then follows the churn.
+        // onEmpty → flush the recorder's buffered tail the instant the mix goes silent (meeting close),
+        // so the final partial timeslice (the last few seconds of speech) is a real chunk before the
+        // page navigates away on eviction. `chunker` is assigned just below and set by the time this fires.
+        mixer = new DynamicAudioMixer(() => chunker?.flush());
+        let ready = false;
+        for (let i = 0; i < 5; i++) {
+          mixer.scan();
+          if (mixer.connectedCount > 0) { ready = true; break; }
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        if (!ready) { blog("[record-chunker] no audio streams — cannot record"); mixer.stop(); mixer = null; return; }
+        mixer.start();
+        stream = mixer.stream;
       }
       chunker = new MediaRecorderChunker({
         stream,
@@ -326,6 +408,8 @@ export function createRecordingTap(opts: CreateRecordingTapOptions): RecordingTa
     async stop(): Promise<void> {
       await chunker?.stop();
       chunker = null;
+      mixer?.stop();
+      mixer = null;
     },
   };
 }
