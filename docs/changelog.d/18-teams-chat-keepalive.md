@@ -1,4 +1,4 @@
-- **Chat commands keep working in long Teams meetings (#16).** After about half an hour in a
+- **Chat commands keep working in long Teams meetings (#18).** After about half an hour in a
   meeting, Teams stopped sending new chat messages to the bot, so `attend help`, `leave` and
   `discard` went unanswered for the rest of a long meeting. While the bot listens for commands it
   now moves the pointer slightly every minute and reopens the chat pane every five minutes.
