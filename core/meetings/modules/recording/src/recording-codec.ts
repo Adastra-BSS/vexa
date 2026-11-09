@@ -23,6 +23,9 @@
  *    (ffmpeg's concat demuxer would drop the Cluster-only inputs — so NOT ffmpeg.)
  *  - wav: RIFF-aware merge — strip each chunk's 44-byte header, sum the PCM
  *    payloads, prepend one corrected master header (fmt copied from chunk 0).
+ *  - mp4: the video path's fragmented mp4 — chunk 0 is ffmpeg's `init.mp4`
+ *    (ftyp + moov) and the rest are CMAF fragments (moof + mdat). Concatenating
+ *    them in seq order IS the container, so it shares the webm byte-concat.
  */
 
 const WAV_HEADER_BYTES = 44;
@@ -61,7 +64,8 @@ function buildWavMaster(chunks: Buffer[]): Buffer {
   return Buffer.concat([header, ...payloads]);
 }
 
-/** Byte-concat in seq order. The empty final chunk concatenates as a no-op. */
+/** Byte-concat in seq order — webm Clusters and mp4 fragments alike. The empty final chunk
+ *  concatenates as a no-op. */
 function buildWebmMaster(chunks: Buffer[]): Buffer {
   if (chunks.length === 0) throw new Error("buildWebmMaster requires at least one chunk");
   return Buffer.concat(chunks);
@@ -75,6 +79,6 @@ function buildWebmMaster(chunks: Buffer[]): Buffer {
  * duration metadata (meeting-api optionally injects it via ffmpeg; the desktop
  * keeps it dependency-free). Seeking is approximate; playback is correct.
  */
-export function buildRecordingMaster(format: "webm" | "wav", chunks: Buffer[]): Buffer {
+export function buildRecordingMaster(format: "webm" | "wav" | "mp4", chunks: Buffer[]): Buffer {
   return format === "wav" ? buildWavMaster(chunks) : buildWebmMaster(chunks);
 }

@@ -29,8 +29,11 @@
  */
 import { buildRecordingMaster } from "./recording-codec";
 
-/** The recording.v1 master container — the format the wire's `format` carries. */
-export type RecordingMasterFormat = "webm" | "wav";
+/** The recording.v1 master container — the format the wire's `format` carries.
+ *
+ * `mp4` is the video path's fragmented-mp4: an init segment followed by CMAF fragments, assembled by
+ * the same byte-concat as `webm` (only `wav` needs a header merge), so it needs no new builder. */
+export type RecordingMasterFormat = "webm" | "wav" | "mp4";
 
 /** A finished recording master, ready for the host to persist + serve. */
 export interface RecordingMaster {

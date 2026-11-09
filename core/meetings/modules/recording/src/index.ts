@@ -15,7 +15,8 @@
  */
 export * from "./audio-pipeline";          // UnifiedRecordingPipeline, MediaRecorderCapture, PulseAudioCapture, ChunkSink
 export { RecordingService } from "./recording";
-export { VideoRecordingService } from "./video-recording";
+export { VideoRecordingService, VIDEO_INIT_SEGMENT, VIDEO_MEDIA_FORMAT, seqForSegment } from "./video-recording";
+export type { VideoRecordingOptions, VideoHwAccel } from "./video-recording";
 export { setLoggers } from "./log";
 export { buildRecordingMaster } from "./recording-codec";   // recording.v1 master codec; Python twin = meeting-api/recording_codec.py
 // recording.v1 FINALIZE LIFECYCLE (accumulate-by-seq → drop empty final → build on is_final OR close).
