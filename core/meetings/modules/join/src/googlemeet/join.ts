@@ -325,7 +325,9 @@ export function isOffTheMeeting(currentUrl: string, meetingUrl: string, pageText
   try {
     const now = new URL(currentUrl);
     const sent = new URL(meetingUrl);
-    if (now.host !== sent.host || now.pathname.replace(/\/$/, "") !== sent.pathname.replace(/\/$/, "")) return true;
+    // By the meeting code, not the whole path: Meet itself moves a guest to /meet/<code>.
+    const code = sent.pathname.split("/").filter(Boolean).pop() ?? "";
+    if (now.host !== sent.host || !now.pathname.split("/").includes(code)) return true;
   } catch {
     return false;
   }

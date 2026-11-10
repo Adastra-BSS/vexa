@@ -27,6 +27,10 @@ async function main() {
     isOffTheMeeting('https://meet.google.com/landing?hl=en', MEETING, ''), true);
   check('the meeting\'s green room is on the meeting',
     isOffTheMeeting(MEETING, MEETING, 'What\'s your name?\nAsk to join'), false);
+  check('Meet moving a guest to /meet/<code> is still the meeting (live, 2026-11-10)',
+    isOffTheMeeting('https://meet.google.com/meet/jqv-rxqe-urw?hl=en', MEETING, 'Ask to join'), false);
+  check('another meeting\'s code is off the meeting',
+    isOffTheMeeting('https://meet.google.com/abc-defg-hij?hl=en', MEETING, ''), true);
   check('a URL that cannot be read is not judged off',
     isOffTheMeeting('not a url', MEETING, ''), false);
 
