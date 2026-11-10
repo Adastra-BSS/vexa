@@ -12,10 +12,12 @@
  * and skipped rather than retried forever — losing one 15-second fragment degrades the recording,
  * whereas blocking the queue would lose everything after it.
  *
- * Gating: `recordingEnabled` plus either `captureModes` including "video" or RECORD_VIDEO=true on the
- * deployment. The env form exists because the capture cost is a deployment property (a bot pool sized
- * for audio cannot absorb an encode), so an operator must be able to turn it off without touching the
- * control plane.
+ * Gating: `recordingEnabled`, RECORD_VIDEO=true on the deployment, and a Google Meet meeting. The env
+ * is the switch because the capture cost is a deployment property (a bot pool sized for audio cannot
+ * absorb an encode). `captureModes` is not: meeting-api sends ["audio", "video"] with every recorded
+ * meeting, so reading it recorded the screen everywhere, RECORD_VIDEO off included. Meet only, because
+ * Teams video is H.264, which this browser cannot decode (see the capture bridge's video diagnostics):
+ * a Teams capture would hold the tiles and never a shared screen.
  *
  * L4-gated (needs ffmpeg + PulseAudio + a live X display) — proven on a real bot, not unit tests.
  * Every path is best-effort: a recording fault must never change the bot's join/leave/exit.
@@ -26,9 +28,7 @@ import type { Invocation } from './config.js';
 
 /** True when this invocation should capture the display as well as the audio. */
 export function wantsVideoCapture(inv: Invocation, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (!inv.recordingEnabled) return false;
-  if (Array.isArray(inv.captureModes) && inv.captureModes.includes('video')) return true;
-  return env.RECORD_VIDEO === 'true';
+  return Boolean(inv.recordingEnabled) && env.RECORD_VIDEO === 'true' && inv.platform === 'google_meet';
 }
 
 /**

@@ -310,6 +310,49 @@ export function withPinnedMeetLocale(meetingUrl: string, locale: string): string
   }
 }
 
+/** How many more times the meeting link is opened after Google turned the bot away from it. */
+export const MEET_REDIRECT_RETRIES = 2;
+const MEET_REDIRECT_SETTLE_MS = 3000;
+
+/**
+ * Whether the page has left the meeting it was sent to: another host (Google's product page,
+ * workspace.google.com/products/meet), another path on Meet (its home screen), or Meet's own
+ * "You can't join this video call", which counts down to that home screen. Attend saw it on four
+ * of thirteen guest joins (2026-11-09/10), each a link a later try got into. A URL that cannot be
+ * read is never judged off, so this can only add a retry, never mask a real failure.
+ */
+export function isOffTheMeeting(currentUrl: string, meetingUrl: string, pageText: string): boolean {
+  try {
+    const now = new URL(currentUrl);
+    const sent = new URL(meetingUrl);
+    if (now.host !== sent.host || now.pathname.replace(/\/$/, "") !== sent.pathname.replace(/\/$/, "")) return true;
+  } catch {
+    return false;
+  }
+  return pageText.includes("You can't join this video call");
+}
+
+/**
+ * Run one guest join attempt, opening the meeting link again when it failed because the page was
+ * turned away from the meeting - at most `retries` more times. A failure on the meeting itself
+ * (a lobby that never showed its button) is not retried, and the last failure is rethrown as is.
+ */
+export async function withMeetLinkRetry<T>(
+  attempt: () => Promise<T>,
+  opts: { offTheMeeting: () => Promise<boolean>; reopen: () => Promise<void>; log: (m: string) => void; retries?: number }
+): Promise<T> {
+  const retries = opts.retries ?? MEET_REDIRECT_RETRIES;
+  for (let tried = 0; ; tried++) {
+    try {
+      return await attempt();
+    } catch (e) {
+      if (tried >= retries || !(await opts.offTheMeeting())) throw e;
+      opts.log(`Google turned the bot away from the meeting (try ${tried + 1} of ${retries + 1}); opening the link again.`);
+      await opts.reopen();
+    }
+  }
+}
+
 export async function joinGoogleMeeting(
   page: Page,
   meetingUrl: string,
@@ -448,6 +491,18 @@ export async function joinGoogleMeeting(
     await page.screenshot({ path: '/app/storage/screenshots/bot-checkpoint-0-after-join-now.png', fullPage: true });
     log("📸 Screenshot taken: After join click (authenticated)");
   } else {
+    await withMeetLinkRetry(() => joinAsGuest(), {
+      offTheMeeting: async () =>
+        isOffTheMeeting(page.url(), navUrl, await page.locator("body").innerText().catch(() => "")),
+      reopen: async () => {
+        await page.goto(navUrl, { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(MEET_REDIRECT_SETTLE_MS);
+      },
+      log,
+    });
+  }
+
+  async function joinAsGuest(): Promise<void> {
     // Anonymous flow: enter bot name and ask to join
     log("Attempting to find name input field...");
 
