@@ -126,6 +126,8 @@ def default_registry() -> ProfileRegistry:
         for key in (
             "BOT_ALONE_SILENCE_WINDOW_MS",
             "BOT_EMPTY_ROOM_WINDOW_MS",
+            "BOT_NOBODY_JOINED_WINDOW_MS",
+            "BOT_MAX_ACTIVE_MS",
             "BOT_SPEAKER_MIN_AUDIO_SEC",
             "BOT_SPEAKER_SUBMIT_INTERVAL_SEC",
             "BOT_SPEAKER_CONFIRM_THRESHOLD",

@@ -265,12 +265,18 @@ runtime:
     confirmThreshold: ""
     maxBufferSec: ""
     idleTimeoutSec: ""
-  # Active-phase remote-audio silence window. Empty uses the bot's 10-minute default.
+  # Quiet window (policy P2): no remote audio this long, people still joined, before the bot leaves
+  # with a chat notice. Empty uses the bot's 40-minute default.
   aloneSilenceWindowMs: ""
   # How long the roster may show nobody but bots, once someone has been in the meeting, before the
   # bot leaves, whatever the silence window. Empty uses the bot's 5-minute default; 0 disables the
   # rule (silence alone decides).
   emptyRoomWindowMs: ""
+  # No-one-joined window (policy P6): the room never had anybody in it after admission. Empty uses the
+  # bot's 15-minute default; 0 disables the rule.
+  nobodyJoinedWindowMs: ""
+  # Hard cap on the active phase (policy P8). Empty uses the bot's 12-hour default.
+  maxActiveMs: ""
   # Message every bot posts once into the meeting chat right after admission (Teams), e.g. a
   # recording notice. Multi-line text is kept as is; empty posts nothing.
   joinNotice: ""

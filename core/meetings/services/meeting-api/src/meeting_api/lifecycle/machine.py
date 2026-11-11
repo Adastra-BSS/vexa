@@ -42,9 +42,10 @@ def _presence_entry(entry: Any) -> Optional[Dict[str, Any]]:
         return None
     return {"name": name.strip(), "first_seen_ms": int(first), "last_seen_ms": int(last)}
 
-# The bot's aloneness rules, which both complete a meeting as left_alone. Allow-listed because the
-# value is producer-supplied and lands verbatim in meeting.data.
-ALONE_RULES = frozenset({"empty-room", "silence"})
+# The bot's aloneness rules, which all complete a meeting as left_alone: everyone left (empty-room),
+# nobody ever joined (nobody-joined), or no remote audio for the quiet window (silence). Allow-listed
+# because the value is producer-supplied and lands verbatim in meeting.data.
+ALONE_RULES = frozenset({"empty-room", "nobody-joined", "silence"})
 #: How a meeting came to be discarded: "attend discard" in the chat, or a participant removing the bot.
 DISCARD_TRIGGERS = frozenset({"command", "removed"})
 

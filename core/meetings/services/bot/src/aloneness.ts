@@ -1,9 +1,14 @@
 /** Active-phase aloneness derived from the remote-audio signal. */
 import type { AlonenessSource } from './ports.js';
 
-export const DEFAULT_ALONE_SILENCE_WINDOW_MS = 10 * 60 * 1000;
-/** Long enough to sit out someone dropping and rejoining, short against the silence window. */
+/** Quiet window (policy P2): no remote audio for this long leaves the meeting. Long enough to sit
+ *  out a break with people still connected. */
+export const DEFAULT_ALONE_SILENCE_WINDOW_MS = 40 * 60 * 1000;
+/** Empty-room window (policy P1): everybody left after someone had been in the room. Long enough to
+ *  sit out someone dropping and rejoining. */
 export const DEFAULT_EMPTY_ROOM_WINDOW_MS = 5 * 60 * 1000;
+/** No-one-joined window (policy P6): the room never had anybody in it after the bot was admitted. */
+export const DEFAULT_NOBODY_JOINED_WINDOW_MS = 15 * 60 * 1000;
 export const DEFAULT_ALONENESS_POLL_MS = 1_500;
 /** Presence floor for a DELIVERED remote frame — deliberately 0 (arrival is the signal).
  *
@@ -70,8 +75,9 @@ export interface RemoteAudioActivityTap extends RemoteAudioActivitySource {
 }
 
 export type AlonenessVerdict = 'alone' | 'not-alone' | 'unavailable';
-/** Which rule ended the meeting. Both complete it as left_alone, so this is the only record of why. */
-export type AloneRule = 'empty-room' | 'silence';
+/** Which rule ended the meeting. Every rule completes it as left_alone, so this is the only record of
+ *  why. `silence` is the quiet window (P2): remote audio has been absent for the whole window. */
+export type AloneRule = 'empty-room' | 'nobody-joined' | 'silence';
 
 /** One deployment-selectable rule. Future presence checks can veto by returning not-alone. */
 export interface AlonenessAdapter {
@@ -123,18 +129,25 @@ export function createRemoteAudioActivityTap(options: {
   };
 }
 
-/** A room empty for the window, after somebody had been in it, means everyone left. No roster
+/** A roster that stayed empty for the window ends the meeting. After somebody had been in the room
+ *  that is `empty-room` (P1, everyone left); before anybody came it is `nobody-joined` (P6). No roster
  *  report at all means the platform or page cannot count, which is not evidence of an empty room.
  *  Neither is a roster that reads empty while the bot still hears someone: the scan can lose the
  *  participant tiles when Teams re-lays out the stage (the chat pane opening), so the room must also
- *  have been silent for the window. */
-function emptyRoomFor(snapshot: RemoteAudioActivitySnapshot, now: number, emptyRoomMs: number): boolean {
-  return emptyRoomMs > 0
-    && snapshot.roomEverOccupied === true
-    && snapshot.roomEmpty === true
-    && snapshot.roomEmptySince !== undefined
-    && now - snapshot.roomEmptySince >= emptyRoomMs
-    && (snapshot.lastHeardAt === undefined || now - snapshot.lastHeardAt >= emptyRoomMs);
+ *  have been silent for the same window. A window of 0 disables its rule. */
+function roomRule(
+  snapshot: RemoteAudioActivitySnapshot,
+  now: number,
+  emptyRoomMs: number,
+  nobodyJoinedMs: number,
+): AloneRule | undefined {
+  if (snapshot.roomEmpty !== true || snapshot.roomEmptySince === undefined) return undefined;
+  const occupied = snapshot.roomEverOccupied === true;
+  const windowMs = occupied ? emptyRoomMs : nobodyJoinedMs;
+  if (windowMs <= 0) return undefined;
+  if (now - snapshot.roomEmptySince < windowMs) return undefined;
+  if (snapshot.lastHeardAt !== undefined && now - snapshot.lastHeardAt < windowMs) return undefined;
+  return occupied ? 'empty-room' : 'nobody-joined';
 }
 
 export const silenceAlonenessAdapter: AlonenessAdapter = {
@@ -159,9 +172,22 @@ export function resolveAloneSilenceWindowMs(
   if (raw !== undefined && raw.trim() !== '') {
     const value = Number(raw);
     if (Number.isFinite(value) && value > 0) return value;
-    warn(`BOT_ALONE_SILENCE_WINDOW_MS=${JSON.stringify(raw)} is invalid; using the 10-minute default`);
+    warn(`BOT_ALONE_SILENCE_WINDOW_MS=${JSON.stringify(raw)} is invalid; using the 40-minute default`);
   }
   return DEFAULT_ALONE_SILENCE_WINDOW_MS;
+}
+
+export function resolveNobodyJoinedWindowMs(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = (message) => console.warn(`[bot] ${message}`),
+): number {
+  const raw = env.BOT_NOBODY_JOINED_WINDOW_MS;
+  if (raw !== undefined && raw.trim() !== '') {
+    const value = Number(raw);
+    if (Number.isFinite(value) && value >= 0) return value;
+    warn(`BOT_NOBODY_JOINED_WINDOW_MS=${JSON.stringify(raw)} is invalid; using the 15-minute default`);
+  }
+  return DEFAULT_NOBODY_JOINED_WINDOW_MS;
 }
 
 export function resolveEmptyRoomWindowMs(
@@ -182,6 +208,8 @@ export function createSilenceAlonenessSource(options: {
   windowMs: number;
   /** How long an empty roster is tolerated before leaving; 0 disables the rule. */
   emptyRoomMs?: number;
+  /** How long a roster that never had anybody in it is tolerated; 0 disables the rule. */
+  nobodyJoinedMs?: number;
   adapters?: readonly AlonenessAdapter[];
   now?: () => number;
   pollMs?: number;
@@ -193,6 +221,7 @@ export function createSilenceAlonenessSource(options: {
   const pollMs = options.pollMs ?? DEFAULT_ALONENESS_POLL_MS;
   const adapters = options.adapters ?? [silenceAlonenessAdapter];
   const emptyRoomMs = options.emptyRoomMs ?? 0;
+  const nobodyJoinedMs = options.nobodyJoinedMs ?? 0;
   const setIntervalFn = options.setInterval ?? ((callback, ms) => setInterval(callback, ms));
   const clearIntervalFn = options.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>));
   const log = options.log ?? ((message) => console.log(`[bot] ${message}`));
@@ -200,7 +229,7 @@ export function createSilenceAlonenessSource(options: {
 
   return {
     firedRule: () => firedRule,
-    onAlone(callback): () => void {
+    onAlone(callback: (rule: AloneRule) => void): () => void {
       let handle: unknown;
       let stopped = false;
       let fired = false;
@@ -219,12 +248,13 @@ export function createSilenceAlonenessSource(options: {
           firedRule = rule;
           stop();
           log(`aloneness: ${rule} verdict (${detail})`);
-          callback();
+          callback(rule);
         };
-        // Either rule ends the meeting on its own: the silence window is for a room that still has
-        // people in it, so an emptied room must not have to sit it out.
-        if (emptyRoomFor(snapshot, at, emptyRoomMs)) {
-          verdict('empty-room', `room_empty_since=${snapshot.roomEmptySince}, empty_room_ms=${emptyRoomMs}`);
+        // Any rule ends the meeting on its own: the quiet window is for a room that still has people
+        // in it, so an emptied room or an unjoined one must not have to sit it out.
+        const room = roomRule(snapshot, at, emptyRoomMs, nobodyJoinedMs);
+        if (room) {
+          verdict(room, `room_empty_since=${snapshot.roomEmptySince}, window_ms=${room === 'empty-room' ? emptyRoomMs : nobodyJoinedMs}`);
           return;
         }
         for (const adapter of adapters) {
