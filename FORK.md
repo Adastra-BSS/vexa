@@ -83,9 +83,9 @@ workflow, for new and returning developers: [`docs/DEVELOPMENT.md`](docs/DEVELOP
 ## Upstream #866: handled for Teams
 
 [Vexa-ai/vexa#866](https://github.com/Vexa-ai/vexa/issues/866) - the bot never fires `left_alone`
-after everyone leaves a Teams meeting. This was first left to Attend's own supervisor, which still
-issues the hard stop at meeting end plus grace. The fork now leaves an emptied Teams room itself
-(see the empty-room row above); the other platforms keep upstream's silence-only rule.
+after everyone leaves a Teams meeting. The fork now leaves an emptied Teams room itself (see the
+empty-room row above); the other platforms keep upstream's silence-only rule. The full policy is in
+[docs/leave-policy.md](docs/leave-policy.md).
 
 ## Pinning
 
