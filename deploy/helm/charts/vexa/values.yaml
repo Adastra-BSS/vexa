@@ -285,6 +285,10 @@ runtime:
   # before the bot leaves or discards; empty leaves or discards without a reply.
   chatHelp: ""
   chatLeaveAck: ""
+  # Chat notice before a self-initiated leave (policy P2, P6, P8). Empty keeps the built-in text.
+  leaveNoticeQuiet: ""
+  leaveNoticeNobodyJoined: ""
+  leaveNoticeMaxActive: ""
   chatDiscardAck: ""
   # How a bot listening for chat commands keeps receiving the chat past half an hour: "on" (or
   # empty) nudges the pointer every minute and reopens the chat pane every five minutes; "nudge"

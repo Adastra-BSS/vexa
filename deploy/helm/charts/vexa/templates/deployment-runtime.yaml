@@ -76,6 +76,12 @@ spec:
               value: {{ .Values.runtime.joinNotice | default "" | quote }}
             - name: BOT_CHAT_HELP
               value: {{ .Values.runtime.chatHelp | default "" | quote }}
+            - name: BOT_LEAVE_NOTICE_QUIET
+              value: {{ .Values.runtime.leaveNoticeQuiet | default "" | quote }}
+            - name: BOT_LEAVE_NOTICE_NOBODY_JOINED
+              value: {{ .Values.runtime.leaveNoticeNobodyJoined | default "" | quote }}
+            - name: BOT_LEAVE_NOTICE_MAX_ACTIVE
+              value: {{ .Values.runtime.leaveNoticeMaxActive | default "" | quote }}
             - name: BOT_CHAT_LEAVE_ACK
               value: {{ .Values.runtime.chatLeaveAck | default "" | quote }}
             - name: BOT_CHAT_DISCARD_ACK

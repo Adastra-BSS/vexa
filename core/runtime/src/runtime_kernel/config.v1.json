@@ -165,6 +165,33 @@
    ]
   },
   {
+   "key": "BOT_LEAVE_NOTICE_QUIET",
+   "class": "defaulted",
+   "default": "(built-in text)",
+   "description": "chat notice posted before the bot leaves after no speech for the quiet window; empty keeps the built-in text; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
+   "key": "BOT_LEAVE_NOTICE_NOBODY_JOINED",
+   "class": "defaulted",
+   "default": "(built-in text)",
+   "description": "chat notice posted before the bot leaves because nobody joined; empty keeps the built-in text; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
+   "key": "BOT_LEAVE_NOTICE_MAX_ACTIVE",
+   "class": "defaulted",
+   "default": "(built-in text)",
+   "description": "chat notice posted before the bot leaves at its active-time cap; empty keeps the built-in text; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
    "key": "BOT_JOIN_NOTICE",
    "class": "defaulted",
    "default": "(unset - no notice)",

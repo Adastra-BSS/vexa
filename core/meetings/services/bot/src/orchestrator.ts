@@ -55,6 +55,24 @@ export function leaveNoticeKind(reason: CompletionReason, rule?: AloneRule): Lea
 /** Upper bound on the leave notice, so a hung chat can never delay the leave itself. */
 export const LEAVE_NOTICE_TIMEOUT_MS = 10_000;
 
+export const LEAVE_NOTICE_TEXT_ENV: Record<LeaveNoticeKind, string> = {
+  quiet: 'BOT_LEAVE_NOTICE_QUIET',
+  'nobody-joined': 'BOT_LEAVE_NOTICE_NOBODY_JOINED',
+  'max-active': 'BOT_LEAVE_NOTICE_MAX_ACTIVE',
+};
+
+export const DEFAULT_LEAVE_NOTICE_TEXT: Record<LeaveNoticeKind, string> = {
+  quiet: 'No speech for 40 minutes, so I\'m leaving the meeting.',
+  'nobody-joined': 'Nobody joined within 15 minutes, so I\'m leaving.',
+  'max-active': 'I\'ve reached my maximum time in a meeting (12 hours), so I\'m leaving.',
+};
+
+/** The text posted for each leave notice. An empty or blank variable keeps the built-in text. */
+export function resolveLeaveNoticeTexts(env: NodeJS.ProcessEnv): Record<LeaveNoticeKind, string> {
+  const text = (kind: LeaveNoticeKind): string => (env[LEAVE_NOTICE_TEXT_ENV[kind]] ?? '').trim() || DEFAULT_LEAVE_NOTICE_TEXT[kind];
+  return { quiet: text('quiet'), 'nobody-joined': text('nobody-joined'), 'max-active': text('max-active') };
+}
+
 export interface OrchestratorDeps {
   lifecycle: LifecycleSink;
   join: JoinDriver;

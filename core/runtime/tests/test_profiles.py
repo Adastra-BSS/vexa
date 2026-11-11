@@ -75,10 +75,12 @@ def test_meeting_bot_forwards_speaker_stream_tuning(monkeypatch):
 def test_meeting_bot_forwards_the_leave_policy_windows(monkeypatch):
     monkeypatch.setenv("BOT_NOBODY_JOINED_WINDOW_MS", "900000")
     monkeypatch.setenv("BOT_MAX_ACTIVE_MS", "43200000")
+    monkeypatch.setenv("BOT_LEAVE_NOTICE_QUIET", "Quiet, leaving.")
     reg = default_registry()
     env = reg.get("meeting-bot").base_env
     assert env["BOT_NOBODY_JOINED_WINDOW_MS"] == "900000"
     assert env["BOT_MAX_ACTIVE_MS"] == "43200000"
+    assert env["BOT_LEAVE_NOTICE_QUIET"] == "Quiet, leaving."
 
 
 def test_meeting_bot_forwards_the_join_notice_verbatim(monkeypatch):

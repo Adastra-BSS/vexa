@@ -16,7 +16,7 @@ import addFormats from 'ajv-formats';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOrchestrator, CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE_EXIT, leaveNoticeKind, type LeaveNoticeKind, type MeetingResult } from './orchestrator.js';
+import { createOrchestrator, CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE_EXIT, DEFAULT_LEAVE_NOTICE_TEXT, leaveNoticeKind, resolveLeaveNoticeTexts, type LeaveNoticeKind, type MeetingResult } from './orchestrator.js';
 import { createLivePipeline } from './pipeline.js';
 import { canTransition, type Act, type BotStatus, type CompletionReason, type LifecycleEvent, type TranscriptSegment } from './contracts.js';
 import type { ActsSource, JoinDriver, JoinOutcome, LifecycleSink, TranscriptSink, PrimaryReachability, RemovalKind } from './ports.js';
@@ -618,6 +618,15 @@ async function main(): Promise<void> {
     for (const [reason, rule, want] of kinds) {
       check(`leave notice kind: ${reason}/${rule ?? '-'} → ${want ?? 'none'}`, leaveNoticeKind(reason, rule) === want, String(leaveNoticeKind(reason, rule)));
     }
+  }
+
+  {
+    check('leave notice texts: unset env keeps the built-in text', JSON.stringify(resolveLeaveNoticeTexts({})) === JSON.stringify(DEFAULT_LEAVE_NOTICE_TEXT));
+    check('leave notice texts: blank env keeps the built-in text',
+      resolveLeaveNoticeTexts({ BOT_LEAVE_NOTICE_QUIET: '   ' }).quiet === DEFAULT_LEAVE_NOTICE_TEXT.quiet);
+    const custom = resolveLeaveNoticeTexts({ BOT_LEAVE_NOTICE_NOBODY_JOINED: 'Nobody came, bye.', BOT_LEAVE_NOTICE_MAX_ACTIVE: 'Cap reached.' });
+    check('leave notice texts: env overrides one kind at a time',
+      custom['nobody-joined'] === 'Nobody came, bye.' && custom['max-active'] === 'Cap reached.' && custom.quiet === DEFAULT_LEAVE_NOTICE_TEXT.quiet);
   }
 
   /** One active phase ended by `trigger`, recording the leave notice and the leave in order. */

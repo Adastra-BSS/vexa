@@ -27,7 +27,7 @@
 import { createClient } from 'redis';
 import { loadInvocation, InvocationError, speakerStreamConfigFromEnv, type Invocation } from './config.js';
 import type { Act, LifecycleEvent, TranscriptSegment } from './contracts.js';
-import { createOrchestrator, type LeaveNoticeKind } from './orchestrator.js';
+import { createOrchestrator, type LeaveNoticeKind, resolveLeaveNoticeTexts } from './orchestrator.js';
 import { createHttpLifecycleSink } from './adapters/lifecycle-http.js';
 import { createRedisTranscriptSink, redisClientFrom } from './adapters/transcript-redis.js';
 import { createRedisActsSource, redisActsClientFrom } from './adapters/acts-redis.js';
@@ -169,12 +169,13 @@ function meetingChatFor(
     ? createChatCommands({ texts, botName: inv.botName, send, onLeave: controls.leave, onDiscard: controls.discard, meetingId: inv.meeting_id })
     : undefined;
   // The leave notice: says why the bot is leaving on its own. Teams only, like every other chat send.
+  const leaveTexts = resolveLeaveNoticeTexts(env);
   const leaveNotice = async (kind: LeaveNoticeKind): Promise<void> => {
     if (!teams) {
       botEvent('leave_notice_failed', { meeting_id: inv.meeting_id, kind, reason: 'unsupported_platform' });
       return;
     }
-    const result = await send(LEAVE_NOTICE_TEXT[kind]);
+    const result = await send(leaveTexts[kind]);
     if (result.ok) botEvent('leave_notice_posted', { meeting_id: inv.meeting_id, kind });
     else botEvent('leave_notice_failed', { meeting_id: inv.meeting_id, kind, reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) });
   };
@@ -207,12 +208,6 @@ function meetingChatFor(
   return { afterAdmission, commands, stop, leaveNotice };
 }
 
-/** What the meeting is told before the bot leaves on its own (see orchestrator.leaveNoticeKind). */
-const LEAVE_NOTICE_TEXT: Record<LeaveNoticeKind, string> = {
-  quiet: 'No speech for 40 minutes, so I\'m leaving the meeting.',
-  'nobody-joined': 'Nobody joined within 15 minutes, so I\'m leaving.',
-  'max-active': 'I\'ve reached my maximum time in a meeting (12 hours), so I\'m leaving.',
-};
 
 /**
  * Probe the SECONDARY control-plane channel (redis) for the reachability gate (#530). A fresh,
