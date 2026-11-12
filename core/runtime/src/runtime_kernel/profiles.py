@@ -126,6 +126,12 @@ def default_registry() -> ProfileRegistry:
         for key in (
             "BOT_ALONE_SILENCE_WINDOW_MS",
             "BOT_EMPTY_ROOM_WINDOW_MS",
+            "BOT_NOBODY_JOINED_WINDOW_MS",
+            "BOT_MAX_ACTIVE_MS",
+            # Free text like the chat replies: the chat notice the bot posts before a self-initiated leave.
+            "BOT_LEAVE_NOTICE_QUIET",
+            "BOT_LEAVE_NOTICE_NOBODY_JOINED",
+            "BOT_LEAVE_NOTICE_MAX_ACTIVE",
             "BOT_SPEAKER_MIN_AUDIO_SEC",
             "BOT_SPEAKER_SUBMIT_INTERVAL_SEC",
             "BOT_SPEAKER_CONFIRM_THRESHOLD",

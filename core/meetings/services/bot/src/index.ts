@@ -27,7 +27,7 @@
 import { createClient } from 'redis';
 import { loadInvocation, InvocationError, speakerStreamConfigFromEnv, type Invocation } from './config.js';
 import type { Act, LifecycleEvent, TranscriptSegment } from './contracts.js';
-import { createOrchestrator } from './orchestrator.js';
+import { createOrchestrator, type LeaveNoticeKind, resolveLeaveNoticeTexts } from './orchestrator.js';
 import { createHttpLifecycleSink } from './adapters/lifecycle-http.js';
 import { createRedisTranscriptSink, redisClientFrom } from './adapters/transcript-redis.js';
 import { createRedisActsSource, redisActsClientFrom } from './adapters/acts-redis.js';
@@ -43,6 +43,7 @@ import { createSpeakerTimeline } from './speaker-timeline.js';
 import { launchBrowser, startCaptureBridge, startRecording, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
 import {
   createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs, resolveEmptyRoomWindowMs,
+  resolveNobodyJoinedWindowMs,
 } from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
 import { createJoinNotice, resolveJoinNotice, type JoinNotice } from './join-notice.js';
@@ -96,9 +97,9 @@ function meetingChannelId(inv: Invocation): string | number {
  *  `orchestrator.run({ maxActiveMs })` is a HARD ceiling on the active phase that resolves to
  *  `completed(max_bot_time_exceeded)` — a backstop so a bot can never live forever (the granular
  *  silence timeout that maps to left_alone is driven by the injected AlonenessSource). This is a
- *  GENEROUS backstop (default 4h, override with BOT_MAX_ACTIVE_MS in ms). We floor it at the largest
+ *  backstop (default 12h, override with BOT_MAX_ACTIVE_MS in ms). We floor it at the largest
  *  configured lifecycle timeout + 60s so it cannot undercut a more specific lifecycle verdict. */
-const DEFAULT_MAX_ACTIVE_MS = 4 * 60 * 60 * 1000; // 4 hours
+const DEFAULT_MAX_ACTIVE_MS = 12 * 60 * 60 * 1000; // 12 hours
 function deriveMaxActiveMs(inv: Invocation, everyoneLeftMs: number, env: NodeJS.ProcessEnv = process.env): number {
   const al = inv.automaticLeave ?? {};
   const noOneJoined = al.noOneJoinedTimeout ?? 600_000;
@@ -153,7 +154,7 @@ function meetingChatFor(
   env: NodeJS.ProcessEnv,
   page: BrowserSession['page'],
   controls: { leave: () => void; discard: () => void },
-): { afterAdmission?: JoinNotice; commands?: ChatCommands; stop?: () => void } {
+): { afterAdmission?: JoinNotice; commands?: ChatCommands; stop?: () => void; leaveNotice: (kind: LeaveNoticeKind) => Promise<void> } {
   const teams = inv.platform === 'teams';
   const texts = resolveChatCommandTexts(env);
   const listening = teams && Boolean(texts.help);
@@ -167,7 +168,18 @@ function meetingChatFor(
   const commands = listening
     ? createChatCommands({ texts, botName: inv.botName, send, onLeave: controls.leave, onDiscard: controls.discard, meetingId: inv.meeting_id })
     : undefined;
-  if (!notice && !commands) return {};
+  // The leave notice: says why the bot is leaving on its own. Teams only, like every other chat send.
+  const leaveTexts = resolveLeaveNoticeTexts(env);
+  const leaveNotice = async (kind: LeaveNoticeKind): Promise<void> => {
+    if (!teams) {
+      botEvent('leave_notice_failed', { meeting_id: inv.meeting_id, kind, reason: 'unsupported_platform' });
+      return;
+    }
+    const result = await send(leaveTexts[kind]);
+    if (result.ok) botEvent('leave_notice_posted', { meeting_id: inv.meeting_id, kind });
+    else botEvent('leave_notice_failed', { meeting_id: inv.meeting_id, kind, reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) });
+  };
+  if (!notice && !commands) return { leaveNotice };
   let stopKeepalive: (() => void) | undefined;
   let ended = false;
   const afterAdmission: JoinNotice = {
@@ -193,8 +205,9 @@ function meetingChatFor(
     },
   };
   const stop = () => { ended = true; stopKeepalive?.(); };
-  return { afterAdmission, commands, stop };
+  return { afterAdmission, commands, stop, leaveNotice };
 }
+
 
 /**
  * Probe the SECONDARY control-plane channel (redis) for the reachability gate (#530). A fresh,
@@ -269,6 +282,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   let notice: JoinNotice | undefined;
   let commands: ChatCommands | undefined;
   let stopChat: (() => void) | undefined;
+  let leaveNotice: ((kind: LeaveNoticeKind) => Promise<void>) | undefined;
   const recording = inv.recordingEnabled ? createBotRecordingSink({ inv, log: (m) => console.log(`[bot] ${m}`) }) : undefined;
   // O-TEL-1: persist the raw captured-signal.v1 stream for offline replay. Off ⇒ the tap is a
   // single undefined-check and the capture path is byte-for-byte unchanged. VEXA_CAPTURE_SIGNAL=1
@@ -299,10 +313,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   const remoteAudioActivity = createRemoteAudioActivityTap();
   const aloneSilenceWindowMs = resolveAloneSilenceWindowMs(inv.automaticLeave?.everyoneLeftTimeout, env);
   const emptyRoomWindowMs = resolveEmptyRoomWindowMs(env);
+  const nobodyJoinedWindowMs = resolveNobodyJoinedWindowMs(env);
   const aloneness = createSilenceAlonenessSource({
-    activity: remoteAudioActivity, windowMs: aloneSilenceWindowMs, emptyRoomMs: emptyRoomWindowMs,
+    activity: remoteAudioActivity, windowMs: aloneSilenceWindowMs, emptyRoomMs: emptyRoomWindowMs, nobodyJoinedMs: nobodyJoinedWindowMs,
   });
-  console.log(`[bot] aloneness: silence adapter enabled (window_ms=${aloneSilenceWindowMs}, empty_room_ms=${emptyRoomWindowMs})`);
+  console.log(`[bot] aloneness: quiet_ms=${aloneSilenceWindowMs} empty_room_ms=${emptyRoomWindowMs} nobody_joined_ms=${nobodyJoinedWindowMs}`);
   if (speakerStreamConfig) console.log(`[bot] speaker-stream tuning enabled: ${JSON.stringify(speakerStreamConfig)}`);
 
   try {
@@ -365,6 +380,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     notice = chat.afterAdmission;
     commands = chat.commands;
     stopChat = chat.stop;
+    leaveNotice = chat.leaveNotice;
     // Teams chat feeds the commands and nothing else - never the transcript. Jitsi chat is still
     // published as transcript `chat` segments.
     const onChat = inv.platform === 'teams'
@@ -408,6 +424,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     recording: recording as RecordingSink | undefined,
     reachability,
     notice,
+    leaveNotice,
     degraded: () => {
       const faults = sttFaults.report();
       const timeline = speakerTimeline.snapshot();

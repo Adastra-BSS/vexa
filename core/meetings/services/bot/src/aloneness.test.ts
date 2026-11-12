@@ -6,6 +6,8 @@ import {
   createSilenceAlonenessSource,
   resolveAloneSilenceWindowMs,
   resolveEmptyRoomWindowMs,
+  resolveNobodyJoinedWindowMs,
+  DEFAULT_NOBODY_JOINED_WINDOW_MS,
 } from './aloneness.js';
 
 let failed = 0;
@@ -384,17 +386,17 @@ const onlyBots = (n: number) => ({ participants: n, named: n, bots: n });
   check('a zero empty-room window disables the rule', fired === 0);
 }
 
-// Timeout precedence: explicit invocation > valid env > 10-minute module default.
+// Timeout precedence: explicit invocation > valid env > 40-minute module default.
 {
   check('explicit everyoneLeftTimeout wins',
     resolveAloneSilenceWindowMs(12_345, { BOT_ALONE_SILENCE_WINDOW_MS: '23456' }) === 12_345);
   check('env override applies when invocation is absent',
     resolveAloneSilenceWindowMs(undefined, { BOT_ALONE_SILENCE_WINDOW_MS: '23456' }) === 23_456);
-  check('module default is ten minutes',
+  check('module default is forty minutes',
     resolveAloneSilenceWindowMs(undefined, {}) === DEFAULT_ALONE_SILENCE_WINDOW_MS &&
-    DEFAULT_ALONE_SILENCE_WINDOW_MS === 600_000);
+    DEFAULT_ALONE_SILENCE_WINDOW_MS === 2_400_000);
   check('invalid env falls back to module default',
-    resolveAloneSilenceWindowMs(undefined, { BOT_ALONE_SILENCE_WINDOW_MS: 'nope' }, () => {}) === 600_000);
+    resolveAloneSilenceWindowMs(undefined, { BOT_ALONE_SILENCE_WINDOW_MS: 'nope' }, () => {}) === 2_400_000);
 }
 
 // Which rule ended the meeting is reported, because both end it as the same left_alone.
@@ -428,6 +430,62 @@ const onlyBots = (n: number) => ({ participants: n, named: n, bots: n });
   check('invalid empty-room env falls back to the module default',
     resolveEmptyRoomWindowMs({ BOT_EMPTY_ROOM_WINDOW_MS: '-5' }, (m) => warnings.push(m)) === 300_000
     && warnings.length === 1);
+}
+
+// No-one-joined window (P6): a room that never had anybody in it, after the bot was admitted.
+{
+  check('nobody-joined module default is 15 minutes',
+    DEFAULT_NOBODY_JOINED_WINDOW_MS === 900_000 && resolveNobodyJoinedWindowMs({}) === 900_000);
+  check('nobody-joined env override applies', resolveNobodyJoinedWindowMs({ BOT_NOBODY_JOINED_WINDOW_MS: '60000' }) === 60_000);
+  check('an explicit 0 disables the nobody-joined rule', resolveNobodyJoinedWindowMs({ BOT_NOBODY_JOINED_WINDOW_MS: '0' }) === 0);
+  const warnings: string[] = [];
+  check('invalid nobody-joined env falls back to the default',
+    resolveNobodyJoinedWindowMs({ BOT_NOBODY_JOINED_WINDOW_MS: 'x' }, (m) => warnings.push(m)) === 900_000 && warnings.length === 1);
+
+  const clock = new FakeClock();
+  const scheduler = new FakeScheduler();
+  const activity = createRemoteAudioActivityTap({ now: clock.now });
+  activity.ready();
+  let fired = 0;
+  const reasons: string[] = [];
+  const source = createSilenceAlonenessSource({
+    activity, windowMs: 2_400_000, emptyRoomMs: 300_000, nobodyJoinedMs: 900_000,
+    now: clock.now, pollMs: 10, setInterval: scheduler.setInterval, clearInterval: scheduler.clearInterval,
+    log: () => {},
+  });
+  source.onAlone((rule) => { fired++; reasons.push(rule); });
+  activity.observeRoster(soloAvatar);
+  clock.advance(14 * 60_000); scheduler.tick();
+  check('nobody joined: no leave before the 15-minute window', fired === 0);
+  clock.advance(60_000); scheduler.tick();
+  check('nobody joined: leaves at the 15-minute window', fired === 1);
+  check('nobody joined: reports the nobody-joined rule', reasons[0] === 'nobody-joined' && source.firedRule() === 'nobody-joined');
+
+  // Someone speaking unseen by the roster keeps the room open even though the scan reads empty.
+  const heard = (() => {
+    const c = new FakeClock(); const sch = new FakeScheduler(); const t = createRemoteAudioActivityTap({ now: c.now });
+    t.ready(); let n = 0;
+    const src = createSilenceAlonenessSource({ activity: t, windowMs: 2_400_000, nobodyJoinedMs: 900_000, now: c.now, pollMs: 10,
+      setInterval: sch.setInterval, clearInterval: sch.clearInterval, log: () => {} });
+    src.onAlone(() => n++);
+    t.observeRoster(soloAvatar);
+    for (let i = 0; i < 20; i++) { c.advance(60_000); t.observeRemoteEnergy(loudEnergy); sch.tick(); }
+    return n;
+  })();
+  check('nobody joined: audible but unlisted people keep the room open', heard === 0, `fired=${heard}`);
+
+  // Once somebody has been in the room, an empty room is the empty-room rule, not nobody-joined.
+  const occupied = (() => {
+    const c = new FakeClock(); const sch = new FakeScheduler(); const t = createRemoteAudioActivityTap({ now: c.now });
+    t.ready(); const r: string[] = [];
+    const src = createSilenceAlonenessSource({ activity: t, windowMs: 2_400_000, emptyRoomMs: 300_000, nobodyJoinedMs: 900_000, now: c.now, pollMs: 10,
+      setInterval: sch.setInterval, clearInterval: sch.clearInterval, log: () => {} });
+    src.onAlone((rule) => r.push(rule));
+    t.observeRoster(people(1)); t.observeRoster(soloAvatar);
+    c.advance(300_000); sch.tick();
+    return r;
+  })();
+  check('everyone left after being there is the empty-room rule', occupied[0] === 'empty-room', JSON.stringify(occupied));
 }
 
 console.log(failed

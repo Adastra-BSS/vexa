@@ -58,7 +58,10 @@ export interface LifecycleEvent {
   roster_complete?: boolean;
   /** Which aloneness rule ended a left_alone meeting: the room emptied, or it fell silent.
    *  Additive, same liberal-ingestion rationale as `infra_fault` below. */
-  alone_rule?: 'empty-room' | 'silence';
+  alone_rule?: 'empty-room' | 'nobody-joined' | 'silence';
+  /** Which removal ended an `evicted` meeting: a participant removed the bot, or the call ended under
+   *  it (the host ended the meeting). Additive, same liberal-ingestion rationale as `alone_rule`. */
+  removal_kind?: 'removed_by_participant' | 'ended';
   /** Machine-readable infra-fault tag on a pre-join control-plane-unreachable abort (#530).
    *  Additive field: lifecycle.v1 ingests liberally (additionalProperties:true), so this rides
    *  the SEALED contract WITHOUT a schema/seal bump — it carries the attribution the sealed

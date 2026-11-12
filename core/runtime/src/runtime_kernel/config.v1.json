@@ -123,8 +123,8 @@
   {
    "key": "BOT_ALONE_SILENCE_WINDOW_MS",
    "class": "defaulted",
-   "default": "600000",
-   "description": "active-phase remote-audio silence window before completed(left_alone); forwarded to spawned bots when set",
+   "default": "2400000",
+   "description": "quiet window (policy P2): no remote audio for this long, with people still joined, before completed(left_alone) and a chat notice; forwarded to spawned bots when set",
    "targets": [
     "compose",
     "helm",
@@ -135,11 +135,60 @@
    "key": "BOT_EMPTY_ROOM_WINDOW_MS",
    "class": "defaulted",
    "default": "300000",
-   "description": "how long the roster may show nobody but bots, after someone had been in the meeting, before completed(left_alone), regardless of the silence window; 0 disables; forwarded to spawned bots when set",
+   "description": "how long the roster may show nobody but bots, after someone had been in the meeting, before completed(left_alone) (policy P1, no chat notice); 0 disables; forwarded to spawned bots when set",
    "targets": [
     "compose",
     "helm",
     "lite"
+   ]
+  },
+  {
+   "key": "BOT_NOBODY_JOINED_WINDOW_MS",
+   "class": "defaulted",
+   "default": "900000",
+   "description": "how long a roster may stay empty before anybody has joined, after the bot is admitted, before completed(left_alone) and a chat notice (policy P6); 0 disables; forwarded to spawned bots when set",
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
+  },
+  {
+   "key": "BOT_MAX_ACTIVE_MS",
+   "class": "defaulted",
+   "default": "43200000",
+   "description": "hard cap on the active phase (policy P8, 12 hours) before completed(max_bot_time_exceeded) and a chat notice; forwarded to spawned bots when set",
+   "targets": [
+    "compose",
+    "helm",
+    "lite"
+   ]
+  },
+  {
+   "key": "BOT_LEAVE_NOTICE_QUIET",
+   "class": "defaulted",
+   "default": "(built-in text)",
+   "description": "chat notice posted before the bot leaves after no speech for the quiet window; empty keeps the built-in text; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
+   "key": "BOT_LEAVE_NOTICE_NOBODY_JOINED",
+   "class": "defaulted",
+   "default": "(built-in text)",
+   "description": "chat notice posted before the bot leaves because nobody joined; empty keeps the built-in text; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
+   ]
+  },
+  {
+   "key": "BOT_LEAVE_NOTICE_MAX_ACTIVE",
+   "class": "defaulted",
+   "default": "(built-in text)",
+   "description": "chat notice posted before the bot leaves at its active-time cap; empty keeps the built-in text; forwarded to spawned bots when set",
+   "targets": [
+    "helm"
    ]
   },
   {
