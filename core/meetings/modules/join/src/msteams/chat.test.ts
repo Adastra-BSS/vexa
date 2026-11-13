@@ -13,7 +13,7 @@
 
 import { JSDOM } from 'jsdom';
 import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, nudgeTeamsPointer, openTeamsChatPane, pasteChatHtml, refreshTeamsChatPane, sendTeamsChatMessage, type ChatPage } from './chat';
-import { teamsChatButtonSelectors, teamsChatInputSelectors, teamsChatMessageSelectors, teamsChatSendButtonSelectors } from './selectors';
+import { teamsChatButtonSelectors, teamsChatComposeFallbackSelectors, teamsChatInputSelectors, teamsChatMessageSelectors, teamsChatSendButtonSelectors } from './selectors';
 
 let passed = 0, failed = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -41,7 +41,11 @@ interface FakeOptions {
   enterSends?: boolean;
   /** Whether clicking the pane's Send button sends it. */
   sendButtonSends?: boolean;
+  /** The compose box's markup around what is composed; default the CKEditor the spike saw. */
+  editor?: (composed: string) => string;
 }
+
+const CKEDITOR = (composed: string) => `<div data-tid="ckeditor" contenteditable="true">${composed}</div>`;
 
 /** A page whose visibility answers come from a jsdom document the fake keeps in sync. */
 function fakePage(opts: FakeOptions = {}) {
@@ -60,13 +64,19 @@ function fakePage(opts: FakeOptions = {}) {
   );
   const doc = dom.window.document;
 
+  const editor = opts.editor ?? CKEDITOR;
   const render = () => {
     doc.getElementById('pane')!.innerHTML = paneOpen && inputInPane
-      ? `<div data-tid="ckeditor" contenteditable="true">${composed}</div>`
+      ? `${editor(composed)}<div role="toolbar"><button aria-label="Emoji"></button><button aria-label="Send"></button></div>`
       : '';
   };
   render();
 
+  // Compose box and Send button are visible when the pane's markup really matches the selector,
+  // so an editor no selector names stays unseen, as it did live.
+  const inPane = (sel: string) => {
+    try { return doc.getElementById('pane')!.querySelector(sel) !== null; } catch { return false; }
+  };
   const isChatButton = (sel: string) => teamsChatButtonSelectors.includes(sel);
   const isSendButton = (sel: string) => teamsChatSendButtonSelectors.includes(sel);
   const deliver = () => {
@@ -77,7 +87,7 @@ function fakePage(opts: FakeOptions = {}) {
     composed = '';
     render();
   };
-  const isInput = (sel: string) => teamsChatInputSelectors.includes(sel);
+  const isInput = (sel: string) => teamsChatInputSelectors.includes(sel) || teamsChatComposeFallbackSelectors.includes(sel);
 
   const page: ChatPage = {
     locator(sel: string) {
@@ -86,8 +96,7 @@ function fakePage(opts: FakeOptions = {}) {
           return {
             async isVisible() {
               if (isChatButton(sel)) return buttonState() !== 'absent';
-              if (isSendButton(sel)) return paneOpen && inputInPane;
-              if (isInput(sel)) return paneOpen && inputInPane;
+              if (isSendButton(sel) || isInput(sel)) return inPane(sel);
               return false;
             },
             async isEnabled() {
@@ -256,6 +265,40 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     const { page } = fakePage({ chatButton: 'disabled' });
     const result = await sendTeamsChatMessage(page, NOTICE, FAST);
     check('disabled chat button -> chat_disabled', [!result.ok && result.reason, !result.ok && result.detail], ['chat_disabled', 'chat button disabled; toolbar: People, More']);
+  }
+
+  console.log('\n=== a Teams build whose editor no known selector names (Attend prod, 2026-11-13) ===');
+  // Live: the pane was open with its compose toolbar (Insert link, Emoji, Send) and no Chat button,
+  // and the notice failed as chat_disabled in 5 of 31 meetings because no input selector matched.
+  const UNKNOWN_EDITOR = (composed: string) => `<div class="fui-Editor"><p contenteditable="plaintext-only" aria-label="Compose">${composed}</p></div>`;
+  check('the new editor is one no known selector names', UNKNOWN_EDITOR('').length > 0
+    && teamsChatInputSelectors.every((sel) => !new JSDOM(UNKNOWN_EDITOR('')).window.document.querySelector(sel)), true);
+  {
+    const { page, actions, isPaneOpen } = fakePage({ paneOpen: true, chatButton: 'absent', editor: UNKNOWN_EDITOR });
+    const result = await sendTeamsChatMessage(page, NOTICE, FAST);
+    check('an open pane whose Send button shows is posted to through any editable in it', result.ok, true);
+    check('...typed into the editor, the pane untouched', [actions.includes('focus-input'), actions.includes('open-pane')], [true, false]);
+    check('...and left open as it was', isPaneOpen(), true);
+  }
+  {
+    const { page } = fakePage({ paneOpen: true, chatButton: 'absent', editor: UNKNOWN_EDITOR });
+    check('openTeamsChatPane: an open pane with the new editor is open', await openTeamsChatPane(page, FAST), { ok: true });
+  }
+  {
+    // No Send button: the generic editable is not trusted on its own, a contenteditable elsewhere
+    // on the stage is not the chat.
+    const { page } = fakePage({ chatButton: 'absent', editor: UNKNOWN_EDITOR });
+    const result = await sendTeamsChatMessage(page, NOTICE, FAST);
+    check('without the compose toolbar the generic editable is not used', [result.ok, !result.ok && result.reason], [false, 'chat_disabled']);
+  }
+  {
+    // What the bot can see is named, never what anyone wrote: tag and attributes only.
+    const IFRAME_EDITOR = () => '<iframe title="Message compose" data-tid="compose-frame"></iframe>';
+    const { page } = fakePage({ paneOpen: true, chatButton: 'absent', editor: IFRAME_EDITOR });
+    const result = await sendTeamsChatMessage(page, NOTICE, FAST);
+    check('an editor out of reach -> chat_disabled naming what the compose area holds',
+      [!result.ok && result.reason, !result.ok && result.detail],
+      ['chat_disabled', 'no chat button; toolbar: People, More, Emoji, Send; compose: iframe[data-tid=compose-frame][title=Message compose]']);
   }
 
   console.log('\n=== pane opens without a compose box ===');

@@ -253,6 +253,17 @@ export const teamsChatInputSelectors: string[] = [
   'textarea[aria-label*="Type a new message"]',
 ];
 
+// Any editable at all, for a Teams build whose editor none of the above names (Attend prod,
+// 2026-11-13: the pane open with Insert link, Emoji and Send showing, the notice lost in 5 of 31
+// meetings). Used only while the pane's Send button shows, so an editable elsewhere on the stage is
+// never taken for the chat. Most specific first.
+// BROWSER CONTEXT: also handed to composeHasText via document.querySelector.
+export const teamsChatComposeFallbackSelectors: string[] = [
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="textbox"]',
+  'textarea',
+];
+
 // The pane's Send button, beside the compose box (the spike saw it as aria-label "Send"). A
 // message Enter left in the box - seen live once after a paste - is sent with it.
 export const teamsChatSendButtonSelectors: string[] = [
@@ -333,4 +344,4 @@ export const teamsLeaveButtonMatchers: BrowserContextButtonMatcher[] = [
 // `css` field: a Playwright-only `:has-text()` — invalid in that context —
 // would otherwise ship green as a dead selector. `text` fields are raw strings
 // matched against textContent in-page, never parsed as selectors.
-export const browserContextSelectorArrays: string[] = ['teamsLeaveButtonMatchers', 'teamsChatMessageSelectors'];
+export const browserContextSelectorArrays: string[] = ['teamsLeaveButtonMatchers', 'teamsChatMessageSelectors', 'teamsChatComposeFallbackSelectors'];
