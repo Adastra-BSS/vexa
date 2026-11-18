@@ -14,6 +14,7 @@ import type { Page } from "playwright";
 import { renderChatText } from "./chat-format";
 import {
   teamsChatButtonSelectors,
+  teamsChatComposeFallbackSelectors,
   teamsChatInputSelectors,
   teamsChatMessageSelectors,
   teamsChatSendButtonSelectors,
@@ -126,10 +127,58 @@ export function composeHasText({ selectors }: { selectors: string[] }): boolean 
   return false;
 }
 
+/**
+ * Browser context: what the compose area around the pane's Send button holds, as tags and
+ * attributes only - never an element's text, which could be someone's message. Carried on a
+ * chat_disabled failure while the compose toolbar shows, so a Teams build that moved the editor
+ * says where it went (no editable at all, an editor in an iframe, a new attribute).
+ */
+export function composeAreaElements({ sendSelectors }: { sendSelectors: string[] }): string[] {
+  let send: Element | null = null;
+  for (const selector of sendSelectors) {
+    try {
+      send = document.querySelector(selector);
+    } catch {
+      continue;
+    }
+    if (send) break;
+  }
+  const candidates = '[contenteditable], [role="textbox"], textarea, input:not([type="hidden"]), iframe';
+  const attributes = ["role", "data-tid", "contenteditable", "aria-label", "title", "placeholder"];
+  // The nearest ancestor of Send that holds any candidate is the compose area.
+  for (let area = send?.parentElement ?? null, depth = 0; area && depth < 8; area = area.parentElement, depth++) {
+    const found = Array.from(area.querySelectorAll(candidates)).slice(0, 5);
+    if (!found.length) continue;
+    return found.map((element) => {
+      const shown = attributes
+        .filter((name) => element.hasAttribute(name))
+        .map((name) => `[${name}=${(element.getAttribute(name) || "").slice(0, 30)}]`);
+      return `${element.tagName.toLowerCase()}${shown.join("")}`;
+    });
+  }
+  return [];
+}
+
 async function chatUnavailableDetail(page: ChatPage): Promise<string> {
   const shown = (await firstVisible(page, teamsChatButtonSelectors)) ? "chat button disabled" : "no chat button";
   const labels = await page.evaluate(toolbarButtonLabels, undefined).catch(() => [] as string[]);
-  return `${shown}; toolbar: ${labels.length ? labels.join(", ") : "(none)"}`;
+  let detail = `${shown}; toolbar: ${labels.length ? labels.join(", ") : "(none)"}`;
+  if (await firstVisible(page, teamsChatSendButtonSelectors)) {
+    const area = await page
+      .evaluate(composeAreaElements, { sendSelectors: teamsChatSendButtonSelectors })
+      .catch(() => [] as string[]);
+    detail += `; compose: ${area.length ? area.join(", ") : "(nothing editable)"}`;
+  }
+  return detail;
+}
+
+/** The compose box: by a known selector, or - while the pane's Send button shows - by any
+ *  editable, for a Teams build that renamed the editor. */
+async function findCompose(page: ChatPage): Promise<{ selector: string; locator: ChatLocator } | null> {
+  const known = await firstVisible(page, teamsChatInputSelectors);
+  if (known) return known;
+  if (!(await firstVisible(page, teamsChatSendButtonSelectors))) return null;
+  return firstVisible(page, teamsChatComposeFallbackSelectors);
 }
 
 async function firstVisible(page: ChatPage, selectors: string[]): Promise<{ selector: string; locator: ChatLocator } | null> {
@@ -151,7 +200,7 @@ async function waitFor<T>(probe: () => Promise<T | null | false>, timeoutMs: num
 }
 
 type PaneOpening =
-  | { ok: true; input: { locator: ChatLocator }; openedPane: ChatLocator | null; button_ms: number; input_ms: number }
+  | { ok: true; input: { selector: string; locator: ChatLocator }; openedPane: ChatLocator | null; button_ms: number; input_ms: number }
   | { ok: false; reason: "chat_disabled" | "input_not_found"; detail?: string };
 
 type PaneFailure = Extract<PaneOpening, { ok: false }>;
@@ -162,7 +211,7 @@ const failure = (f: PaneFailure) => ({ ok: false as const, reason: f.reason, ...
  *  button, click it and wait for the box. */
 async function openPane(chatPage: ChatPage, options: TeamsChatSendOptions): Promise<PaneOpening> {
   const { buttonTimeoutMs = TEAMS_CHAT_BUTTON_TIMEOUT_MS, inputTimeoutMs = 5000, pollMs = 250 } = options;
-  const already = await firstVisible(chatPage, teamsChatInputSelectors);
+  const already = await findCompose(chatPage);
   if (already) return { ok: true, input: already, openedPane: null, button_ms: 0, input_ms: 0 };
   const started = Date.now();
   const button = await waitFor(
@@ -177,7 +226,7 @@ async function openPane(chatPage: ChatPage, options: TeamsChatSendOptions): Prom
   if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
   const clickedAt = Date.now();
   await button.locator.click();
-  const input = await waitFor(() => firstVisible(chatPage, teamsChatInputSelectors), inputTimeoutMs, pollMs, chatPage);
+  const input = await waitFor(() => findCompose(chatPage), inputTimeoutMs, pollMs, chatPage);
   if (!input) {
     // Put the layout back: a pane with no compose box is of no use to anyone.
     await button.locator.click().catch(() => { /* best-effort */ });
@@ -221,7 +270,7 @@ export async function sendTeamsChatMessage(
     if (rendered.formatted) {
       await chatPage.evaluate(pasteChatHtml, { html: rendered.html, plain: rendered.plain });
       const taken = await waitFor(
-        () => chatPage.evaluate(composeHasText, { selectors: teamsChatInputSelectors }),
+        () => chatPage.evaluate(composeHasText, { selectors: [opened.input.selector] }),
         1500,
         pollMs,
         chatPage,
@@ -239,7 +288,7 @@ export async function sendTeamsChatMessage(
     // the box (2026-10-23), and waiting that out cost each reply 1.5 s. Typed text is sent with
     // Enter, which works; should Enter leave anything behind, the Send button sends it.
     let resent = false;
-    const boxHasText = () => chatPage.evaluate(composeHasText, { selectors: teamsChatInputSelectors });
+    const boxHasText = () => chatPage.evaluate(composeHasText, { selectors: [opened.input.selector] });
     const sendButton = format === "html" ? await firstVisible(chatPage, teamsChatSendButtonSelectors) : null;
     if (sendButton) {
       await sendButton.locator.click();
@@ -284,11 +333,11 @@ export async function refreshTeamsChatPane(page: ChatPage | Page, options: Teams
   const chatPage = page as ChatPage;
   const { inputTimeoutMs = 5000, pollMs = 250 } = options;
   try {
-    if (await firstVisible(chatPage, teamsChatInputSelectors)) {
+    if (await findCompose(chatPage)) {
       const button = await firstVisible(chatPage, teamsChatButtonSelectors);
       if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
       await button.locator.click();
-      await waitFor(async () => !(await firstVisible(chatPage, teamsChatInputSelectors)), inputTimeoutMs, pollMs, chatPage);
+      await waitFor(async () => !(await findCompose(chatPage)), inputTimeoutMs, pollMs, chatPage);
     }
     const opened = await openPane(chatPage, { ...options, buttonTimeoutMs: options.buttonTimeoutMs ?? 10_000 });
     return paneFailed(opened) ? failure(opened) : { ok: true };
