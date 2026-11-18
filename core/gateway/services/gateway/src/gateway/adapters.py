@@ -50,12 +50,19 @@ class HttpxDownstreamClient:
         )
 
     @asynccontextmanager
-    async def open_stream(self, method, url, *, headers=None, params=None, content=None):
+    async def open_stream(self, method, url, *, headers=None, params=None, content=None,
+                          read_timeout=None):
         """Open a streaming downstream request and yield the response HEAD (status + headers)
         while the body is still arriving. The httpx stream is a context manager; it stays open
         for the life of this block so the gateway can relay each chunk as it arrives."""
+        kwargs = {}
+        if read_timeout is not None:
+            # Per request, so the shared streaming client keeps ``read=None`` for every other stream.
+            import httpx
+
+            kwargs["timeout"] = httpx.Timeout(connect=10.0, read=read_timeout, write=10.0, pool=10.0)
         async with self._stream_client.stream(
-            method, url, headers=headers, params=params or None, content=content
+            method, url, headers=headers, params=params or None, content=content, **kwargs
         ) as resp:
             yield resp
 

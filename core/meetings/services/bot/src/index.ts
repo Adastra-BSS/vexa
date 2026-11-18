@@ -14,7 +14,7 @@
  * │    • Pipeline       → capture bridge → @vexa/{gmeet,mixed}-pipeline → @vexa/transcribe-whisper ✅ WIRED (L4 capture · L2/L3 lane)
  * │    • RecordingSink  → per-chunk upload to inv.recordingUploadUrl (master assembled server-side) ✅ WIRED (L4 upload · L3 sink)
  * │    • Speak          → acts.v1 `speak`/`speak_stop` → meeting-UI mic + VM TTS chain          ✅ WIRED (L4)
- * │    • JoinNotice     → BOT_JOIN_NOTICE posted once into the Teams meeting chat after capture  WIRED (L2, L4 spike)
+ * │    • JoinNotice     → BOT_JOIN_NOTICE posted once into the Teams or Meet chat after capture  WIRED (L2, L4 spike)
  * │    • ChatCommands   → attend help/leave/discard read from the Teams chat; discard aborts it all WIRED (L2)
  * └─ The browser/capture/recording-upload/speak legs are BROWSER- or VM-resident → L4-gated
  *    (proven by the O6 VM run, not unit tests). The lane + assembler cores are L2/L3-proven.
@@ -39,17 +39,18 @@ import { createCaptureSignalRecorder, startBotLogSidecar, wrapTranscribeWithTap,
 import { uploadSignalTapes } from './signal-upload.js';
 import { createSttFaultReporter } from './stt-faults.js';
 import { createParticipantPresence } from './participant-presence.js';
+import { startVideoRecording, wantsVideoCapture } from './video-recording.js';
 import { createSpeakerTimeline } from './speaker-timeline.js';
 import { launchBrowser, startCaptureBridge, startRecording, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
 import {
   createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs, resolveEmptyRoomWindowMs,
 } from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
-import { createJoinNotice, resolveJoinNotice, type JoinNotice } from './join-notice.js';
+import { createJoinNotice, resolveJoinNotice, type JoinNotice, type NoticeSendResult } from './join-notice.js';
 import { createChatCommands, resolveChatCommandTexts, serialTasks, serializeSends, type ChatCommands } from './chat-commands.js';
 import { resolveChatKeepalive, startChatKeepalive } from './chat-keepalive.js';
 import { botEvent } from './telemetry.js';
-import { nudgeTeamsPointer, openTeamsChatPane, refreshTeamsChatPane, sendTeamsChatMessage } from '@vexa/join';
+import { nudgeTeamsPointer, openTeamsChatPane, refreshTeamsChatPane, sendGoogleMeetChatMessage, sendTeamsChatMessage } from '@vexa/join';
 import type {
   JoinDriver,
   Pipeline,
@@ -145,8 +146,9 @@ function voiceHandler(speak: SpeakController): (act: Act) => Promise<void> {
  * Returns the hook the orchestrator runs once capture is up - post the notice, then, when the
  * commands are on, make sure the pane stays open for their reader and keep it receiving
  * (chat-keepalive.ts, BOT_CHAT_KEEPALIVE) - the commands themselves, and the stop for the keepalive.
- * Teams only: no other platform has a chat sender, so a notice configured there is reported as
- * `join_notice_failed(unsupported_platform)` rather than skipped silently, and no commands run.
+ * The notice goes out on Teams and Google Meet. Any other platform has no chat sender, so a notice
+ * configured there is reported as `join_notice_failed(unsupported_platform)` rather than skipped
+ * silently. The commands are Teams only: Meet has no chat reader yet.
  */
 function meetingChatFor(
   inv: Invocation,
@@ -158,12 +160,13 @@ function meetingChatFor(
   const texts = resolveChatCommandTexts(env);
   const listening = teams && Boolean(texts.help);
   const run = serialTasks();
-  const send = serializeSends((text: string) => sendTeamsChatMessage(page, text, { keepOpen: listening }), run);
-  const notice = createJoinNotice({
-    text: resolveJoinNotice(env),
-    meetingId: inv.meeting_id,
-    send: teams ? send : async () => ({ ok: false as const, reason: 'unsupported_platform' }),
-  });
+  const post = teams
+    ? (text: string) => sendTeamsChatMessage(page, text, { keepOpen: listening })
+    : inv.platform === 'google_meet'
+      ? (text: string) => sendGoogleMeetChatMessage(page, text)
+      : async () => ({ ok: false as const, reason: 'unsupported_platform' });
+  const send = serializeSends<NoticeSendResult>(post, run);
+  const notice = createJoinNotice({ text: resolveJoinNotice(env), meetingId: inv.meeting_id, send });
   const commands = listening
     ? createChatCommands({ texts, botName: inv.botName, send, onLeave: controls.leave, onDiscard: controls.discard, meetingId: inv.meeting_id })
     : undefined;
@@ -377,6 +380,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     pipeline = createLivePipeline({
       startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, onChat, remoteAudioActivity, speakerTimeline, { listenTeamsChat: Boolean(commands), presence }),   // on the live meeting page
       startRecording: rec ? () => startRecording(sess.page, inv, rec, (tMs) => { speakerTimeline.markRecordingStart(tMs); presence.markRecordingStart(tMs); }) : undefined,          // MediaRecorder → recording.v1
+      startVideo: wantsVideoCapture(inv)                                                    // ffmpeg x11grab → recording.v1
+        ? async () => startVideoRecording(inv, (m) => console.log(`[bot] ${m}`))
+        : undefined,
       engine: bp,
       onFault: (stage, e) => {
         console.error(`[bot] live-pipeline: ${stage} failed (non-fatal, bot stays seated): ${serr(e)}`);
