@@ -194,12 +194,24 @@ join. Re-authenticate the browser profile and retry.
 
 ## When the bot leaves on its own
 
-An active bot leaves after it receives no remote microphone audio for **10 minutes** and the meeting
-finishes as `completed(left_alone)`. The same rule covers an empty room and a room containing only silent
-notetakers: it listens to the remote-audio signal and does not identify participants by name. Bot-generated
-speech is not part of that signal.
+An active bot leaves on its own in these cases. Each one finishes the meeting as `completed(left_alone)`,
+except the active cap:
 
-Set a per-meeting window with `automatic_leave.max_time_left_alone` (milliseconds):
+| When | Waits | Says so in the meeting chat (Teams) |
+|---|---|---|
+| Everyone has left the meeting (only other bots or the bot's own avatar remain) | 5 minutes | No |
+| No remote speech for the quiet window, people still joined (a forgotten participant, a long quiet stretch) | 40 minutes | Yes |
+| Nobody joined after the bot was admitted | 15 minutes | Yes |
+| The active-phase cap | 12 hours | Yes (completes `max_bot_time_exceeded`) |
+
+When the host ends the call or removes the bot, the bot leaves at once and the meeting finishes as `evicted`.
+A meeting that runs past its scheduled end is not cut off.
+
+The rules listen to the remote-audio signal and do not identify participants by name, except the room
+rules, which read the participant list on Teams. Bot-generated speech is not part of that signal. A long
+break with people still connected is fine up to the quiet window.
+
+Set the quiet window for one meeting with `automatic_leave.max_time_left_alone` (milliseconds):
 
 ```bash
 curl -X POST "$API_BASE/bots" \
@@ -211,10 +223,10 @@ curl -X POST "$API_BASE/bots" \
   }'
 ```
 
-An explicit stop still leaves immediately. Removal by the meeting host finishes as `evicted`, and the
-four-hour active-phase cap remains a backstop. A participant who stays but says nothing for the entire
-silence window will also be left; increase the window when silent attendance is expected. Self-hosters can
-change the deployment fallback with `BOT_ALONE_SILENCE_WINDOW_MS`; an explicit per-meeting value wins.
+An explicit stop still leaves immediately. A participant who stays but says nothing for the entire quiet
+window will also be left; increase the window when silent attendance is expected. Self-hosters can change
+the deployment defaults with `BOT_ALONE_SILENCE_WINDOW_MS`, `BOT_EMPTY_ROOM_WINDOW_MS`,
+`BOT_NOBODY_JOINED_WINDOW_MS` and `BOT_MAX_ACTIVE_MS`; an explicit per-meeting value wins.
 
 ## Next
 

@@ -342,9 +342,9 @@ def test_malformed_presence_entries_are_dropped():
     assert "roster_complete" not in final["data"], "no claim the bot did not make"
 
 
-@pytest.mark.parametrize("rule", ["empty-room", "silence"])
+@pytest.mark.parametrize("rule", ["empty-room", "nobody-joined", "silence"])
 def test_the_rule_that_left_the_bot_alone_is_persisted(rule):
-    """Both rules complete as left_alone; only this field says whether the room emptied or fell silent."""
+    """Every rule completes as left_alone; only this field says whether the room emptied, never filled, or fell silent."""
     terminal = {
         "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
         "completion_reason": "left_alone", "alone_rule": rule,

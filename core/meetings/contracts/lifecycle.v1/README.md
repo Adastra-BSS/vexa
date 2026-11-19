@@ -25,8 +25,10 @@ impl enforces it (lean: no separate harness, B8).
 `timestamp`, the UTC time it observed the transition, before transport retries. That producer time
 is the lifecycle fact used for admitted-to-departed runtime; callback receipt time is never a
 service-duration clock. State-dependent fields are `reason · exit_code · completion_reason ·
-failure_stage · bot_logs · bot_resources · speaker_events · alone_rule` (terminal forensics;
-`alone_rule` is `empty-room` or `silence`, saying which aloneness rule ended a `left_alone` meeting).
+failure_stage · bot_logs · bot_resources · speaker_events · alone_rule · removal_kind` (terminal
+forensics; `alone_rule` is `empty-room`, `nobody-joined` or `silence`, saying which aloneness rule ended
+a `left_alone` meeting; `removal_kind` is `ended` or `removed_by_participant`, saying how an `evicted`
+meeting ended).
 
 At the terminal boundary, meeting-api freezes a privacy-safe `service_provenance` projection:
 admission/departure times, bot outcome, transcription provider (`vexa · customer · none`),

@@ -100,7 +100,7 @@ Do not push from an old local `jana-pilot`.
 
 5. **Test with a real meeting.** Put `[dev-<id>]` in the meeting subject; your stack's bot joins as
    "Attend Notetaker - dev-<id>". Dev stacks leave a call after **90 s with no audio**
-   (`alone_silence_seconds` in Attend's `config/dev.yaml`; prod waits 15 min), so speak, or set
+   (`alone_silence_seconds` in Attend's `config/dev.yaml`; prod waits 40 min), so speak, or set
    `VEXA_ALONE_SILENCE_SECONDS=900` in your `.env` for quiet tests.
 6. **Back to the prod build:** remove or empty `VEXA_BRANCH` and deploy again.
 

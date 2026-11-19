@@ -14,6 +14,7 @@
  * The L2 harness substitutes in-memory FAKES for every one of these (no client libs needed).
  */
 import type { BotStatus, LifecycleEvent, Act, TranscriptSegment } from './contracts.js';
+import type { AloneRule } from './aloneness.js';
 
 /** The outcome of the join+admission attempt (an Anti-Corruption verdict, P5 — the
  *  platform's many failure modes translated into the bot's vocabulary). */
@@ -109,7 +110,8 @@ export interface ActsSource {
 
 /** Active-phase aloneness verdict source. Missing capture fails closed inside the adapter. */
 export interface AlonenessSource {
-  onAlone(callback: () => void): () => void;
+  /** Fires once, with the rule that ended the meeting. */
+  onAlone(callback: (rule: AloneRule) => void): () => void;
 }
 
 /** recording.v1 sink — accumulates capture chunks and assembles the master. The real

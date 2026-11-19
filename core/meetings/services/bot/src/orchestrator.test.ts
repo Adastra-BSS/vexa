@@ -16,10 +16,11 @@ import addFormats from 'ajv-formats';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOrchestrator, CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE_EXIT, type MeetingResult } from './orchestrator.js';
+import { createOrchestrator, CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE_EXIT, DEFAULT_LEAVE_NOTICE_TEXT, leaveNoticeKind, resolveLeaveNoticeTexts, type LeaveNoticeKind, type MeetingResult } from './orchestrator.js';
 import { createLivePipeline } from './pipeline.js';
-import { canTransition, type Act, type BotStatus, type LifecycleEvent, type TranscriptSegment } from './contracts.js';
-import type { ActsSource, JoinDriver, JoinOutcome, LifecycleSink, TranscriptSink, PrimaryReachability } from './ports.js';
+import { canTransition, type Act, type BotStatus, type CompletionReason, type LifecycleEvent, type TranscriptSegment } from './contracts.js';
+import type { ActsSource, JoinDriver, JoinOutcome, LifecycleSink, TranscriptSink, PrimaryReachability, RemovalKind } from './ports.js';
+import type { AloneRule } from './aloneness.js';
 import type { Invocation } from './config.js';
 import { noopAloneness, controlledAloneness, noopPipeline, noopActs } from './test-doubles.js';
 
@@ -50,7 +51,7 @@ const recordingSink = (): LifecycleSink & { readonly events: LifecycleEvent[] } 
   const events: LifecycleEvent[] = [];
   return { events, async emit(e: LifecycleEvent) { events.push(e); } };
 };
-const mockJoin = (outcome: JoinOutcome, onRemovalRef?: (fire: () => void) => void): JoinDriver => ({
+const mockJoin = (outcome: JoinOutcome, onRemovalRef?: (fire: (kind?: RemovalKind) => void) => void): JoinDriver => ({
   async join(report) { await report('awaiting_admission'); if (outcome === 'admitted') await report('active'); return outcome; },
   onRemoval(cb) { onRemovalRef?.(cb); return () => { /* */ }; },
   async leave() { /* */ },
@@ -311,16 +312,16 @@ async function main(): Promise<void> {
   // ── silence verdict while active → one schema-valid completed(left_alone) ──
   {
     const lc = recordingSink();
-    let fireAlone: () => void = () => {};
+    let fireAlone: (rule: AloneRule) => void = () => {};
     let stopped = 0;
-    let fireRemoval: () => void = () => {};
+    let fireRemoval: (kind?: RemovalKind) => void = () => {};
     const join = mockJoin('admitted', (fire) => { fireRemoval = fire; });
     const aloneness = controlledAloneness((fire) => { fireAlone = fire; }, () => stopped++);
     const o = createOrchestrator(inv(), {
       lifecycle: lc, join, pipeline: noopPipeline(), acts: noopActs(), aloneness,
     });
     const runP = o.run();
-    setTimeout(() => { fireAlone(); fireAlone(); fireRemoval(); }, 5);
+    setTimeout(() => { fireAlone('silence'); fireAlone('silence'); fireRemoval(); }, 5);
     const res = await runP;
     const terminals = lc.events.filter((event) => event.status === 'completed' || event.status === 'failed');
     check('aloneness: completed(left_alone)',
@@ -602,6 +603,87 @@ async function main(): Promise<void> {
     check('missing port: throws', threw instanceof Error, msg);
     check('missing port: names the port', /required port 'aloneness' is missing/.test(msg), msg);
     check('missing port: not a raw property TypeError', !/Cannot read properties of undefined/.test(msg), msg);
+  }
+
+  // ── leave notice (policy P2 / P6 / P8): said before a self-initiated leave, never for P1 or a user/host end ──
+  {
+    const kinds: Array<[CompletionReason, AloneRule | undefined, LeaveNoticeKind | undefined]> = [
+      ['left_alone', 'silence', 'quiet'],
+      ['left_alone', 'nobody-joined', 'nobody-joined'],
+      ['left_alone', 'empty-room', undefined],
+      ['max_bot_time_exceeded', undefined, 'max-active'],
+      ['stopped', undefined, undefined],
+      ['evicted', undefined, undefined],
+    ];
+    for (const [reason, rule, want] of kinds) {
+      check(`leave notice kind: ${reason}/${rule ?? '-'} → ${want ?? 'none'}`, leaveNoticeKind(reason, rule) === want, String(leaveNoticeKind(reason, rule)));
+    }
+  }
+
+  {
+    check('leave notice texts: unset env keeps the built-in text', JSON.stringify(resolveLeaveNoticeTexts({})) === JSON.stringify(DEFAULT_LEAVE_NOTICE_TEXT));
+    check('leave notice texts: blank env keeps the built-in text',
+      resolveLeaveNoticeTexts({ BOT_LEAVE_NOTICE_QUIET: '   ' }).quiet === DEFAULT_LEAVE_NOTICE_TEXT.quiet);
+    const custom = resolveLeaveNoticeTexts({ BOT_LEAVE_NOTICE_NOBODY_JOINED: 'Nobody came, bye.', BOT_LEAVE_NOTICE_MAX_ACTIVE: 'Cap reached.' });
+    check('leave notice texts: env overrides one kind at a time',
+      custom['nobody-joined'] === 'Nobody came, bye.' && custom['max-active'] === 'Cap reached.' && custom.quiet === DEFAULT_LEAVE_NOTICE_TEXT.quiet);
+  }
+
+  /** One active phase ended by `trigger`, recording the leave notice and the leave in order. */
+  async function endsWith(
+    trigger: (h: { alone: (rule: AloneRule) => void; removal: (kind?: RemovalKind) => void }) => void,
+    opts: { maxActiveMs?: number; notice?: () => Promise<void> } = {},
+  ) {
+    const lc = recordingSink();
+    const order: string[] = [];
+    const left: string[] = [];
+    let alone: (rule: AloneRule) => void = () => {};
+    let removal: (kind?: RemovalKind) => void = () => {};
+    const join: JoinDriver = {
+      ...mockJoin('admitted', (fire) => { removal = fire; }),
+      async leave(reason) { order.push('leave'); left.push(reason); },
+    };
+    const o = createOrchestrator(inv(), {
+      lifecycle: lc, join, pipeline: noopPipeline(), acts: noopActs(), aloneness: controlledAloneness((fire) => { alone = fire; }),
+      leaveNotice: async (kind) => { order.push(`notice:${kind}`); await opts.notice?.(); },
+    });
+    const runP = o.run({ maxActiveMs: opts.maxActiveMs });
+    setTimeout(() => trigger({ alone: (r) => alone(r), removal: (k) => removal(k) }), 5);
+    const res = await runP;
+    return { res, lc, order, left };
+  }
+
+  {
+    const quiet = await endsWith(({ alone }) => alone('silence'));
+    check('notice: quiet leave is announced before the leave',
+      JSON.stringify(quiet.order) === JSON.stringify(['notice:quiet', 'leave']), JSON.stringify(quiet.order));
+    check('notice: quiet leave completes left_alone with alone_rule=silence',
+      quiet.res.completionReason === 'left_alone' && last(quiet.lc.events).alone_rule === 'silence', JSON.stringify(last(quiet.lc.events)));
+  }
+  {
+    const nobody = await endsWith(({ alone }) => alone('nobody-joined'));
+    check('notice: nobody-joined leave is announced', JSON.stringify(nobody.order) === JSON.stringify(['notice:nobody-joined', 'leave']), JSON.stringify(nobody.order));
+    check('notice: nobody-joined completes with alone_rule=nobody-joined', last(nobody.lc.events).alone_rule === 'nobody-joined', JSON.stringify(last(nobody.lc.events)));
+  }
+  {
+    const emptied = await endsWith(({ alone }) => alone('empty-room'));
+    check('notice: everyone-left (empty-room) leaves silently', JSON.stringify(emptied.order) === JSON.stringify(['leave']), JSON.stringify(emptied.order));
+  }
+  {
+    const cap = await endsWith(() => { /* the cap ends it */ }, { maxActiveMs: 5 });
+    check('notice: active cap is announced and completes max_bot_time_exceeded',
+      cap.res.completionReason === 'max_bot_time_exceeded' && JSON.stringify(cap.order) === JSON.stringify(['notice:max-active', 'leave']), JSON.stringify(cap.order));
+  }
+  {
+    const removed = await endsWith(({ removal }) => removal('ended'));
+    check('removal: host ending the call is evicted with removal_kind=ended, no notice',
+      removed.res.completionReason === 'evicted' && last(removed.lc.events).removal_kind === 'ended' && removed.order.join() === 'leave',
+      JSON.stringify(last(removed.lc.events)));
+  }
+  {
+    const failingNotice = await endsWith(({ alone }) => alone('silence'), { notice: async () => { throw new Error('chat down'); } });
+    check('notice: a failing notice still lets the bot leave', failingNotice.res.completionReason === 'left_alone' && failingNotice.left.length === 1,
+      JSON.stringify(failingNotice.left));
   }
 
   if (failed) { console.error(`\n❌ orchestrator (L2): ${failed} check(s) FAILED.`); process.exit(1); }

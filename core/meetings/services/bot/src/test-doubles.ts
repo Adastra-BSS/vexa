@@ -7,6 +7,7 @@
  */
 import type { Act } from './contracts.js';
 import type { ActsSource, AlonenessSource, Pipeline } from './ports.js';
+import type { AloneRule } from './aloneness.js';
 
 /** Never-firing aloneness source — the default for suites that are not about left_alone. */
 export const noopAloneness = (): AlonenessSource => ({
@@ -19,7 +20,7 @@ export const noopAloneness = (): AlonenessSource => ({
 
 /** Aloneness source the test can fire (and optionally observe stop). */
 export const controlledAloneness = (
-  ref: (fire: () => void) => void,
+  ref: (fire: (rule: AloneRule) => void) => void,
   onStop?: () => void,
 ): AlonenessSource => ({
   onAlone(callback) {

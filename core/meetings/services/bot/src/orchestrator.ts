@@ -37,6 +37,41 @@ import type {
   ControlPlaneProbe,
 } from './ports.js';
 import type { JoinNotice } from './join-notice.js';
+import type { AloneRule } from './aloneness.js';
+
+/** Why the bot is leaving on its own, when the meeting should be told. P1 (everyone left) is absent on
+ *  purpose: it is the common case and posting there would be noise. */
+export type LeaveNoticeKind = 'quiet' | 'nobody-joined' | 'max-active';
+
+/** The leave-notice kind for a self-initiated end, or undefined when the bot leaves silently. */
+export function leaveNoticeKind(reason: CompletionReason, rule?: AloneRule): LeaveNoticeKind | undefined {
+  if (reason === 'max_bot_time_exceeded') return 'max-active';
+  if (reason !== 'left_alone') return undefined;
+  if (rule === 'silence') return 'quiet';
+  if (rule === 'nobody-joined') return 'nobody-joined';
+  return undefined;
+}
+
+/** Upper bound on the leave notice, so a hung chat can never delay the leave itself. */
+export const LEAVE_NOTICE_TIMEOUT_MS = 10_000;
+
+export const LEAVE_NOTICE_TEXT_ENV: Record<LeaveNoticeKind, string> = {
+  quiet: 'BOT_LEAVE_NOTICE_QUIET',
+  'nobody-joined': 'BOT_LEAVE_NOTICE_NOBODY_JOINED',
+  'max-active': 'BOT_LEAVE_NOTICE_MAX_ACTIVE',
+};
+
+export const DEFAULT_LEAVE_NOTICE_TEXT: Record<LeaveNoticeKind, string> = {
+  quiet: 'No speech for 40 minutes, so I\'m leaving the meeting.',
+  'nobody-joined': 'Nobody joined within 15 minutes, so I\'m leaving.',
+  'max-active': 'I\'ve reached my maximum time in a meeting (12 hours), so I\'m leaving.',
+};
+
+/** The text posted for each leave notice. An empty or blank variable keeps the built-in text. */
+export function resolveLeaveNoticeTexts(env: NodeJS.ProcessEnv): Record<LeaveNoticeKind, string> {
+  const text = (kind: LeaveNoticeKind): string => (env[LEAVE_NOTICE_TEXT_ENV[kind]] ?? '').trim() || DEFAULT_LEAVE_NOTICE_TEXT[kind];
+  return { quiet: text('quiet'), 'nobody-joined': text('nobody-joined'), 'max-active': text('max-active') };
+}
 
 export interface OrchestratorDeps {
   lifecycle: LifecycleSink;
@@ -67,6 +102,10 @@ export interface OrchestratorDeps {
    *  capture runs. Fire-and-forget: it reports its own outcome and must never delay, fail or end
    *  the meeting. ABSENT ⇒ no notice (BOT_JOIN_NOTICE empty, or a platform without chat support). */
   notice?: JoinNotice;
+  /** Optional - posted once, before a self-initiated leave that the meeting should hear about
+   *  (`leaveNoticeKind`). Best-effort and bounded by LEAVE_NOTICE_TIMEOUT_MS: it never blocks or
+   *  fails the leave. ABSENT, or a platform without chat, ⇒ the leave is logged only. */
+  leaveNotice?: (kind: LeaveNoticeKind) => Promise<void>;
 }
 
 /** The dedicated non-zero exit code for a pre-join control-plane-unreachable abort (#530). On
@@ -174,6 +213,10 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
   // The end signal: a `leave` act, host removal, or a timeout all resolve the active phase.
   let signalEnd: ((r: CompletionReason) => void) | null = null;
   const ended = new Promise<CompletionReason>((res) => { signalEnd = res; });
+  // Why the active phase ended, when the end carries more than the completion reason: which aloneness
+  // rule fired, or how a removal happened. Set before signalEnd fires, read once the run has ended.
+  let aloneRule: AloneRule | undefined;
+  let removalKind: 'removed_by_participant' | 'ended' | undefined;
 
   // The PRE-ACTIVE abort signal (Bug 2 — the waiting-room-orphan fix): a stop/SIGTERM that arrives
   // while the bot is still `joining`/`awaiting_admission` (blocked inside `deps.join.join()`, waiting
@@ -324,8 +367,14 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
     if (deps.notice) void deps.notice.post().catch(() => { /* the notice reports its own failure */ });
     // A participant removing the bot ends the call like any other ending: the recording is kept and
     // summarized. Only the `attend discard` command discards it.
-    const stopRemoval = deps.join.onRemoval(() => signalEnd?.('evicted'));
-    const stopAloneness = deps.aloneness.onAlone(() => signalEnd?.('left_alone'));
+    const stopRemoval = deps.join.onRemoval((kind) => {
+      removalKind = kind;
+      signalEnd?.('evicted');
+    });
+    const stopAloneness = deps.aloneness.onAlone((rule) => {
+      aloneRule = rule;
+      signalEnd?.('left_alone');
+    });
     const cap = opts.maxActiveMs && opts.maxActiveMs > 0
       ? setTimeout(() => signalEnd?.('max_bot_time_exceeded'), opts.maxActiveMs)
       : null;
@@ -337,6 +386,15 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
     unsubscribe();
     stopAloneness();
     stopRemoval();
+    // Tell the meeting why the bot is going, when the reason is one it should hear (quiet, nobody
+    // joined, the active cap). Bounded: the chat can hang, the leave must not.
+    const noticeKind = leaveNoticeKind(reason, aloneRule);
+    if (noticeKind && deps.leaveNotice) {
+      await Promise.race([
+        deps.leaveNotice(noticeKind).catch(() => { /* the notice reports its own failure */ }),
+        new Promise<void>((resolve) => setTimeout(resolve, LEAVE_NOTICE_TIMEOUT_MS)),
+      ]);
+    }
     await deps.pipeline.stop().catch(() => { /* best-effort */ });
     // A discarded recording gets no final signal: nothing of it is to be completed.
     if (!discarded) deps.recording?.close(recordingKey);
@@ -350,7 +408,13 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
 
     console.error(`[bot] orchestrator: emitting completed (reason=${reason}, from=${cur})`);
     try {
-      await emit('completed', { completion_reason: reason, exit_code: 0, ...(discarded ? { discarded } : {}) });
+      await emit('completed', {
+      completion_reason: reason,
+      exit_code: 0,
+      ...(aloneRule ? { alone_rule: aloneRule } : {}),
+      ...(removalKind ? { removal_kind: removalKind } : {}),
+      ...(discarded ? { discarded } : {}),
+    });
       console.error('[bot] orchestrator: completed emitted + flushed');
     } catch (e) {
       console.error(`[bot] orchestrator: completed emit THREW: ${String(e)}`);
