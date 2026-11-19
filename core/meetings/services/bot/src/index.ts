@@ -161,8 +161,9 @@ function meetingChatFor(
   const texts = resolveChatCommandTexts(env);
   const listening = teams && Boolean(texts.help);
   const run = serialTasks();
+  const onChatReveal = (moved: boolean) => botEvent('chat_pane_revealed', { meeting_id: inv.meeting_id, moved });
   const post = teams
-    ? (text: string) => sendTeamsChatMessage(page, text, { keepOpen: listening })
+    ? (text: string) => sendTeamsChatMessage(page, text, { keepOpen: listening, onReveal: onChatReveal })
     : inv.platform === 'google_meet'
       ? (text: string) => sendGoogleMeetChatMessage(page, text)
       : async () => ({ ok: false as const, reason: 'unsupported_platform' });
@@ -190,7 +191,7 @@ function meetingChatFor(
       if (notice) await notice.post();
       if (!commands) return;
       // Already open after the notice; opened here when there is no notice, or the notice failed.
-      const opened = await openTeamsChatPane(page);
+      const opened = await openTeamsChatPane(page, { onReveal: onChatReveal });
       if (opened.ok) botEvent('chat_listening', { meeting_id: inv.meeting_id });
       else botEvent('chat_listen_failed', { meeting_id: inv.meeting_id, reason: opened.reason, ...(opened.detail ? { detail: opened.detail } : {}) });
       if (ended) return;
@@ -198,7 +199,7 @@ function meetingChatFor(
       stopKeepalive = startChatKeepalive({
         mode,
         nudge: (step) => nudgeTeamsPointer(page, step),
-        refresh: () => run(() => refreshTeamsChatPane(page)),
+        refresh: () => run(() => refreshTeamsChatPane(page, { onReveal: onChatReveal })),
         onRefresh: (result, duration_ms) => {
           if (result.ok) botEvent('chat_refreshed', { meeting_id: inv.meeting_id, duration_ms });
           else botEvent('chat_refresh_failed', { meeting_id: inv.meeting_id, reason: result.reason, duration_ms, ...(result.detail ? { detail: result.detail } : {}) });

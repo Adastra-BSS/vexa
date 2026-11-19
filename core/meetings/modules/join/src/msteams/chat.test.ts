@@ -369,6 +369,18 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
       [result.ok && result.compose_via, result.ok && result.pane_opened], ['known', false]);
   }
   {
+    const reveals: boolean[] = [];
+    const { page } = fakePage({ paneOpen: true, chatButton: 'absent', hiddenPane: true });
+    await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 0, onReveal: (moved) => reveals.push(moved) });
+    check('onReveal is told the reveal moved a parked pane', reveals, [true]);
+  }
+  {
+    const reveals: boolean[] = [];
+    const { page } = fakePage({ chatButton: 'absent' });
+    await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 0, onReveal: (moved) => reveals.push(moved) });
+    check('onReveal reports moved=false when nothing was parked', reveals, [false]);
+  }
+  {
     // The same page without the reveal: the notice fails as before, the reveal is what cured it.
     const { page, actions } = fakePage({ paneOpen: true, chatButton: 'absent', hiddenPane: true });
     const result = await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 1e9 });

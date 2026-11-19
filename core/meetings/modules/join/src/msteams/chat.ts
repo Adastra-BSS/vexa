@@ -66,6 +66,8 @@ export interface TeamsChatSendOptions {
   /** How long with no Chat button before a parked chat pane is brought back on-screen (default
    *  TEAMS_CHAT_REVEAL_AFTER_MS). */
   revealAfterMs?: number;
+  /** Told when the reveal ran, and whether it moved a parked pane on-screen. */
+  onReveal?: (moved: boolean) => void;
   /** How long to wait for the sent message to appear in the message list. */
   renderTimeoutMs?: number;
   pollMs?: number;
@@ -272,7 +274,8 @@ async function openPane(chatPage: ChatPage, options: TeamsChatSendOptions): Prom
       if (found) return (await found.locator.isEnabled().catch(() => false)) ? { kind: "button", button: found } : null;
       if (!revealTried && Date.now() - started >= revealAfterMs) {
         revealTried = true;
-        await chatPage.evaluate(revealChatPaneInPage, { selectors: teamsChatPaneSelectors }).catch(() => false);
+        const moved = await chatPage.evaluate(revealChatPaneInPage, { selectors: teamsChatPaneSelectors }).catch(() => false);
+        options.onReveal?.(moved);
       }
       return null;
     },
