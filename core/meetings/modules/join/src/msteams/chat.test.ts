@@ -12,8 +12,8 @@
  */
 
 import { JSDOM } from 'jsdom';
-import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, chatMessageRendered, nudgeTeamsPointer, openTeamsChatPane, pasteChatHtml, refreshTeamsChatPane, sendTeamsChatMessage, type ChatPage } from './chat';
-import { teamsChatButtonSelectors, teamsChatComposeFallbackSelectors, teamsChatInputSelectors, teamsChatMessageSelectors, teamsChatSendButtonSelectors } from './selectors';
+import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, TEAMS_CHAT_REVEAL_AFTER_MS, chatMessageRendered, nudgeTeamsPointer, openTeamsChatPane, pasteChatHtml, refreshTeamsChatPane, revealChatPaneInPage, sendTeamsChatMessage, type ChatPage } from './chat';
+import { teamsChatButtonSelectors, teamsChatComposeFallbackSelectors, teamsChatInputSelectors, teamsChatMessageSelectors, teamsChatPaneSelectors, teamsChatSendButtonSelectors } from './selectors';
 
 let passed = 0, failed = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -43,6 +43,9 @@ interface FakeOptions {
   sendButtonSends?: boolean;
   /** The compose box's markup around what is composed; default the CKEditor the spike saw. */
   editor?: (composed: string) => string;
+  /** The chat pane is parked off-screen until revealed: its editor and Send button are not visible
+   *  to the bot (INATTE-25, modelled as not visible: the reveal clears the off-screen offset). */
+  hiddenPane?: boolean;
 }
 
 const CKEDITOR = (composed: string) => `<div data-tid="ckeditor" contenteditable="true">${composed}</div>`;
@@ -60,7 +63,7 @@ function fakePage(opts: FakeOptions = {}) {
   const dom = new JSDOM(
     '<!doctype html><html><body>'
       + '<div role="toolbar"><button aria-label="People"></button><button aria-label="More"></button></div>'
-      + '<div id="pane"></div><div id="list"></div></body></html>',
+      + `<div id="pane" data-tid="chat-pane"${opts.hiddenPane ? ' style="left:-10000px"' : ''}></div><div id="list"></div></body></html>`,
   );
   const doc = dom.window.document;
 
@@ -75,6 +78,7 @@ function fakePage(opts: FakeOptions = {}) {
   // Compose box and Send button are visible when the pane's markup really matches the selector,
   // so an editor no selector names stays unseen, as it did live.
   const inPane = (sel: string) => {
+    if (doc.getElementById('pane')!.style.left.startsWith('-')) return false;
     try { return doc.getElementById('pane')!.querySelector(sel) !== null; } catch { return false; }
   };
   const isChatButton = (sel: string) => teamsChatButtonSelectors.includes(sel);
@@ -130,6 +134,7 @@ function fakePage(opts: FakeOptions = {}) {
     async evaluate<R, A>(fn: (arg: A) => R, arg: A): Promise<R> {
       (globalThis as any).document = doc;
       // jsdom has no ClipboardEvent: the fake stands in for the editor taking (or refusing) a paste.
+      if ((fn as unknown) === revealChatPaneInPage) actions.push('reveal-pane');
       if ((fn as unknown) === pasteChatHtml) {
         actions.push('paste-html');
         if (opts.pasteWorks) { composed = (arg as unknown as { html: string }).html; render(); }
@@ -279,6 +284,18 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     check('an open pane whose Send button shows is posted to through any editable in it', result.ok, true);
     check('...typed into the editor, the pane untouched', [actions.includes('focus-input'), actions.includes('open-pane')], [true, false]);
     check('...and left open as it was', isPaneOpen(), true);
+    check('...the result says it came through the fallback, with the pane already open',
+      [result.ok && result.compose_via, result.ok && result.pane_opened], ['fallback', false]);
+  }
+  {
+    const { page } = fakePage({ paneOpen: true });
+    const result = await sendTeamsChatMessage(page, NOTICE, FAST);
+    check('a known editor -> compose_via "known"', [result.ok && result.compose_via], ['known']);
+  }
+  {
+    const { page } = fakePage({ chatButton: 'enabled' });
+    const result = await sendTeamsChatMessage(page, NOTICE, FAST);
+    check('a pane this routine opened -> pane_opened true', [result.ok && result.pane_opened], [true]);
   }
   {
     const { page } = fakePage({ paneOpen: true, chatButton: 'absent', editor: UNKNOWN_EDITOR });
@@ -336,6 +353,56 @@ const NOTICE = 'This meeting is recorded by Attend Notetaker.\nTato schuzka je n
     check('text only in the compose box is not rendered', chatMessageRendered({ needle: 'Attend notice first line', selectors: teamsChatMessageSelectors }), false);
     check('text in a message-list entry is rendered', chatMessageRendered({ needle: 'Someone else wrote this', selectors: teamsChatMessageSelectors }), true);
     check('an invalid selector is skipped, not thrown', chatMessageRendered({ needle: 'Someone else wrote this', selectors: ['div:has-text("x")', ...teamsChatMessageSelectors] }), true);
+  }
+
+  console.log('\n=== a chat pane parked off-screen with no Chat button (INATTE-25) ===');
+  check('the reveal waits 45 s before it acts', TEAMS_CHAT_REVEAL_AFTER_MS, 45_000);
+  {
+    // The pane is open but parked; the bot sees neither the editor nor Send and no Chat button.
+    // After the reveal the known compose box shows, and the notice is posted through it.
+    const { page, actions } = fakePage({ paneOpen: true, chatButton: 'absent', hiddenPane: true });
+    const result = await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 0 });
+    check('a parked pane is revealed and the notice posted', result.ok, true);
+    check('the reveal runs before the compose box is used',
+      [actions.indexOf('reveal-pane') >= 0 && actions.indexOf('reveal-pane') < actions.indexOf('focus-input')], [true]);
+    check('...via the known editor, with no pane opened by the bot',
+      [result.ok && result.compose_via, result.ok && result.pane_opened], ['known', false]);
+  }
+  {
+    const reveals: boolean[] = [];
+    const { page } = fakePage({ paneOpen: true, chatButton: 'absent', hiddenPane: true });
+    await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 0, onReveal: (moved) => reveals.push(moved) });
+    check('onReveal is told the reveal moved a parked pane', reveals, [true]);
+  }
+  {
+    const reveals: boolean[] = [];
+    const { page } = fakePage({ chatButton: 'absent' });
+    await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 0, onReveal: (moved) => reveals.push(moved) });
+    check('onReveal reports moved=false when nothing was parked', reveals, [false]);
+  }
+  {
+    // The same page without the reveal: the notice fails as before, the reveal is what cured it.
+    const { page, actions } = fakePage({ paneOpen: true, chatButton: 'absent', hiddenPane: true });
+    const result = await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 1e9 });
+    check('before the wait is over, nothing is revealed', actions.includes('reveal-pane'), false);
+    check('...and the notice is still chat_disabled', [result.ok, !result.ok && result.reason], [false, 'chat_disabled']);
+  }
+  {
+    // Nothing parked: the reveal runs, moves nothing, and the notice still fails with the detail.
+    const { page, actions } = fakePage({ chatButton: 'absent' });
+    const result = await sendTeamsChatMessage(page, NOTICE, { ...FAST, revealAfterMs: 0 });
+    check('no parked pane -> the reveal is attempted, no pane moved, chat_disabled',
+      [actions.includes('reveal-pane'), result.ok, !result.ok && result.reason, !result.ok && (result.detail ?? '').includes('pane revealed')],
+      [true, false, 'chat_disabled', true]);
+  }
+  {
+    const dom = new JSDOM('<!doctype html><html><body><div data-tid="chat-pane" style="left:-10000px"></div><div aria-label="Meeting chat" style="left:-10000px"></div><div id="stage" style="left:-10000px"></div></body></html>');
+    (globalThis as any).document = dom.window.document;
+    const first = revealChatPaneInPage({ selectors: teamsChatPaneSelectors });
+    const second = revealChatPaneInPage({ selectors: teamsChatPaneSelectors });
+    const stage = dom.window.document.getElementById('stage')!.style.left;
+    check('the reveal moves parked panes on-screen, once, and leaves other elements alone',
+      [first, second, stage], [true, false, '-10000px']);
   }
 
   console.log('\n=== refreshTeamsChatPane ===');
