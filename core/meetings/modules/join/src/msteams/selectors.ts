@@ -243,6 +243,14 @@ export const teamsChatButtonSelectors: string[] = [
   'button[aria-label="Chat"]',
 ];
 
+// The meeting chat pane itself, for a pane Teams parks off-screen with no Chat button to open it
+// (INATTE-25). Unverified against a live failing layout: the reveal is a no-op where none matches.
+// BROWSER CONTEXT: consumed by revealChatPaneInPage via document.querySelectorAll.
+export const teamsChatPaneSelectors: string[] = [
+  '[data-tid="chat-pane"]',
+  '[aria-label="Meeting chat"]',
+];
+
 // The pane's compose box. Teams' editor is a contenteditable CKEditor; the textarea entries cover
 // older builds (legacy services/vexa-bot chat.ts).
 export const teamsChatInputSelectors: string[] = [
@@ -344,4 +352,4 @@ export const teamsLeaveButtonMatchers: BrowserContextButtonMatcher[] = [
 // `css` field: a Playwright-only `:has-text()` — invalid in that context —
 // would otherwise ship green as a dead selector. `text` fields are raw strings
 // matched against textContent in-page, never parsed as selectors.
-export const browserContextSelectorArrays: string[] = ['teamsLeaveButtonMatchers', 'teamsChatMessageSelectors', 'teamsChatComposeFallbackSelectors'];
+export const browserContextSelectorArrays: string[] = ['teamsLeaveButtonMatchers', 'teamsChatMessageSelectors', 'teamsChatComposeFallbackSelectors', 'teamsChatPaneSelectors'];

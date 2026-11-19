@@ -17,6 +17,7 @@ import {
   teamsChatComposeFallbackSelectors,
   teamsChatInputSelectors,
   teamsChatMessageSelectors,
+  teamsChatPaneSelectors,
   teamsChatSendButtonSelectors,
 } from "./selectors";
 
@@ -25,6 +26,10 @@ import {
  *  stayed disabled for 22-30 s (Attend dev, 2026-10-23), and a 20 s wait lost the notice. The
  *  button is polled, so a long bound costs nothing when Teams is quick. */
 export const TEAMS_CHAT_BUTTON_TIMEOUT_MS = 120_000;
+
+/** How long to wait with no Chat button in the toolbar before bringing a parked chat pane back
+ *  on-screen (INATTE-25: some sessions open the chat pane off-screen with no button to reach it). */
+export const TEAMS_CHAT_REVEAL_AFTER_MS = 45_000;
 
 export type TeamsChatFailure = "chat_disabled" | "input_not_found" | "not_rendered" | "error";
 
@@ -39,7 +44,17 @@ export type TeamsChatTimings = {
 export type TeamsChatSendResult =
   /** `format`: `html` when the formatted text was pasted and Teams took it, `plain` when it was typed.
    *  `resent`: Enter left the message in the compose box and the Send button sent it. */
-  | { ok: true; timings: TeamsChatTimings; format: "html" | "plain"; resent?: boolean }
+  | {
+      ok: true;
+      timings: TeamsChatTimings;
+      format: "html" | "plain";
+      resent?: boolean;
+      /** `known`: the compose box matched a named selector. `fallback`: it was found as any editable
+       *  while the Send button showed (a Teams build that renamed its editor). */
+      compose_via: "known" | "fallback";
+      /** Whether this routine had to open the pane (false: it was already open). */
+      pane_opened: boolean;
+    }
   | { ok: false; reason: TeamsChatFailure; detail?: string };
 
 export interface TeamsChatSendOptions {
@@ -48,6 +63,9 @@ export interface TeamsChatSendOptions {
   buttonTimeoutMs?: number;
   /** How long to wait for the compose box after opening the pane. */
   inputTimeoutMs?: number;
+  /** How long with no Chat button before a parked chat pane is brought back on-screen (default
+   *  TEAMS_CHAT_REVEAL_AFTER_MS). */
+  revealAfterMs?: number;
   /** How long to wait for the sent message to appear in the message list. */
   renderTimeoutMs?: number;
   pollMs?: number;
@@ -159,10 +177,34 @@ export function composeAreaElements({ sendSelectors }: { sendSelectors: string[]
   return [];
 }
 
-async function chatUnavailableDetail(page: ChatPage): Promise<string> {
+/**
+ * Browser context: bring a chat pane that Teams parked off-screen back into view. Returns whether
+ * any pane was moved. Only the inline off-screen offset is cleared, nothing else on the stage.
+ */
+export function revealChatPaneInPage({ selectors }: { selectors: string[] }): boolean {
+  let moved = false;
+  for (const selector of selectors) {
+    let panes: HTMLElement[];
+    try {
+      panes = Array.from(document.querySelectorAll<HTMLElement>(selector));
+    } catch {
+      continue;
+    }
+    for (const pane of panes) {
+      if (pane.style.left.startsWith("-")) {
+        pane.style.left = "";
+        moved = true;
+      }
+    }
+  }
+  return moved;
+}
+
+async function chatUnavailableDetail(page: ChatPage, revealTried = false): Promise<string> {
   const shown = (await firstVisible(page, teamsChatButtonSelectors)) ? "chat button disabled" : "no chat button";
   const labels = await page.evaluate(toolbarButtonLabels, undefined).catch(() => [] as string[]);
   let detail = `${shown}; toolbar: ${labels.length ? labels.join(", ") : "(none)"}`;
+  if (revealTried) detail += "; pane revealed, no compose box";
   if (await firstVisible(page, teamsChatSendButtonSelectors)) {
     const area = await page
       .evaluate(composeAreaElements, { sendSelectors: teamsChatSendButtonSelectors })
@@ -210,20 +252,39 @@ const failure = (f: PaneFailure) => ({ ok: false as const, reason: f.reason, ...
 /** Get the pane's compose box on screen: as it is if the pane is open, else wait for a usable Chat
  *  button, click it and wait for the box. */
 async function openPane(chatPage: ChatPage, options: TeamsChatSendOptions): Promise<PaneOpening> {
-  const { buttonTimeoutMs = TEAMS_CHAT_BUTTON_TIMEOUT_MS, inputTimeoutMs = 5000, pollMs = 250 } = options;
+  const {
+    buttonTimeoutMs = TEAMS_CHAT_BUTTON_TIMEOUT_MS,
+    inputTimeoutMs = 5000,
+    pollMs = 250,
+    revealAfterMs = TEAMS_CHAT_REVEAL_AFTER_MS,
+  } = options;
   const already = await findCompose(chatPage);
   if (already) return { ok: true, input: already, openedPane: null, button_ms: 0, input_ms: 0 };
   const started = Date.now();
-  const button = await waitFor(
+  let revealTried = false;
+  // Polled together: a compose box that appears on its own needs no click, a usable button needs
+  // one, and with no button at all the parked pane is brought back on-screen once, after a wait.
+  const ready = await waitFor<{ kind: "compose"; input: { selector: string; locator: ChatLocator } } | { kind: "button"; button: { selector: string; locator: ChatLocator } }>(
     async () => {
+      const compose = await findCompose(chatPage);
+      if (compose) return { kind: "compose", input: compose };
       const found = await firstVisible(chatPage, teamsChatButtonSelectors);
-      return found && (await found.locator.isEnabled().catch(() => false)) ? found : null;
+      if (found) return (await found.locator.isEnabled().catch(() => false)) ? { kind: "button", button: found } : null;
+      if (!revealTried && Date.now() - started >= revealAfterMs) {
+        revealTried = true;
+        await chatPage.evaluate(revealChatPaneInPage, { selectors: teamsChatPaneSelectors }).catch(() => false);
+      }
+      return null;
     },
     buttonTimeoutMs,
     pollMs,
     chatPage,
   );
-  if (!button) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage) };
+  if (!ready) return { ok: false, reason: "chat_disabled", detail: await chatUnavailableDetail(chatPage, revealTried) };
+  if (ready.kind === "compose") {
+    return { ok: true, input: ready.input, openedPane: null, button_ms: Date.now() - started, input_ms: 0 };
+  }
+  const button = ready.button;
   const clickedAt = Date.now();
   await button.locator.click();
   const input = await waitFor(() => findCompose(chatPage), inputTimeoutMs, pollMs, chatPage);
@@ -314,7 +375,14 @@ export async function sendTeamsChatMessage(
       const detail = (await boxHasText()) ? "text left in the compose box" : "the box emptied but the message never appeared";
       return { ok: false, reason: "not_rendered", detail };
     }
-    return { ok: true, format, ...(resent ? { resent: true } : {}), timings: { button_ms: opened.button_ms, input_ms: opened.input_ms, delivery_ms: Date.now() - typedAt } };
+    return {
+      ok: true,
+      format,
+      ...(resent ? { resent: true } : {}),
+      compose_via: teamsChatInputSelectors.includes(opened.input.selector) ? "known" : "fallback",
+      pane_opened: opened.openedPane !== null,
+      timings: { button_ms: opened.button_ms, input_ms: opened.input_ms, delivery_ms: Date.now() - typedAt },
+    };
   } catch (e: any) {
     return { ok: false, reason: "error", detail: String(e?.message || e).slice(0, 200) };
   } finally {

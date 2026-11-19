@@ -50,6 +50,17 @@ async function main() {
     check('event carries the meeting id', events[0]?.fields.meeting_id === 42, JSON.stringify(events[0]));
     check('event never carries the notice text', !JSON.stringify(events).includes('recorded by'), JSON.stringify(events));
   }
+  {
+    const { events, emit } = recorder();
+    const notice = createJoinNotice({
+      text: NOTICE, emit,
+      send: async () => ({ ok: true, format: 'html', timings: { button_ms: 0, input_ms: 0, delivery_ms: 900 }, compose_via: 'fallback', pane_opened: false }),
+    })!;
+    await notice.post();
+    const fields = events[0]?.fields ?? {};
+    check('the compose path and whether the pane was opened reach the event',
+      fields.compose_via === 'fallback' && fields.pane_opened === false, JSON.stringify(events));
+  }
 
   {
     const { events, emit } = recorder();
