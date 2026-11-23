@@ -15,7 +15,7 @@ import { GOOGLE_MEET_CHAT_BUTTON_TIMEOUT_MS, sendGoogleMeetChatMessage, type Goo
 import { joinMicrosoftTeams } from "./msteams/join";
 import { waitForTeamsMeetingAdmission, checkForTeamsAdmissionSilent } from "./msteams/admission";
 import { prepareForRecording as prepareForTeamsRecording, leaveMicrosoftTeams } from "./msteams/leave";
-import { startTeamsRemovalMonitor, type TeamsRemovalKind } from "./msteams/removal";
+import { probeTeamsCall, startTeamsRemovalMonitor, type TeamsCallProbe, type TeamsRemovalKind } from "./msteams/removal";
 import { TEAMS_CHAT_BUTTON_TIMEOUT_MS, nudgeTeamsPointer, openTeamsChatPane, refreshTeamsChatPane, sendTeamsChatMessage, type TeamsChatFailure, type TeamsChatOpenResult, type TeamsChatSendResult } from "./msteams/chat";
 import { joinZoomMeeting, buildZoomWebClientUrl } from "./zoom/join";
 import { waitForZoomMeetingAdmission, checkForZoomAdmissionSilent } from "./zoom/admission";
@@ -158,7 +158,8 @@ export { joinGoogleMeeting, waitForGoogleMeetingAdmission, checkForGoogleAdmissi
 export { AdmissionError } from "./shared/admission";
 export type { AdmissionOutcome } from "./shared/admission";
 export { AuthSessionError } from "./googlemeet/join";
-export { joinMicrosoftTeams, waitForTeamsMeetingAdmission, checkForTeamsAdmissionSilent, prepareForTeamsRecording, leaveMicrosoftTeams, startTeamsRemovalMonitor };
+export { joinMicrosoftTeams, waitForTeamsMeetingAdmission, checkForTeamsAdmissionSilent, prepareForTeamsRecording, leaveMicrosoftTeams, startTeamsRemovalMonitor, probeTeamsCall };
+export type { TeamsCallProbe };
 // The Teams anonymous-join origin guard. A meetup-join redirected to the Microsoft sign-in host
 // terminates the join THERE with `TeamsJoinRedirectError` — deliberately not an AdmissionError, so
 // the orchestrator's join catch carries its `reasonCode` into the terminal event's reason text

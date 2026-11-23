@@ -46,6 +46,8 @@ def _presence_entry(entry: Any) -> Optional[Dict[str, Any]]:
 # nobody ever joined (nobody-joined), or no remote audio for the quiet window (silence). Allow-listed
 # because the value is producer-supplied and lands verbatim in meeting.data.
 ALONE_RULES = frozenset({"empty-room", "nobody-joined", "silence"})
+#: How an evicted bot's stay ended. `connection_lost`: the call dropped under the bot (INATTE-17).
+REMOVAL_KINDS = frozenset({"removed_by_participant", "ended", "connection_lost"})
 #: How a meeting came to be discarded: "attend discard" in the chat, or a participant removing the bot.
 DISCARD_TRIGGERS = frozenset({"command", "removed"})
 
@@ -279,6 +281,8 @@ class MeetingRecord:
     recording_t0_ms: Optional[int] = None
     #: Why a left_alone bot decided it was alone: the room emptied, or it fell silent.
     alone_rule: Optional[str] = None
+    #: How an evicted bot's stay ended: removed by a participant, the call ended, or the call dropped under it.
+    removal_kind: Optional[str] = None
     #: Set when the bot discarded the meeting on objection - {"at", "trigger": command|removed}.
     #: Everything the meeting left behind is deleted, and no consumer may process it.
     discarded: Optional[Dict[str, str]] = None
@@ -330,6 +334,8 @@ class MeetingRecord:
             d["recording_t0_ms"] = self.recording_t0_ms
         if self.alone_rule is not None:
             d["alone_rule"] = self.alone_rule
+        if self.removal_kind is not None:
+            d["removal_kind"] = self.removal_kind
         if self.discarded is not None:
             d["discarded"] = dict(self.discarded)
         return d
@@ -569,6 +575,8 @@ class LifecycleSink:
                 rec.recording_t0_ms = int(event["recording_t0_ms"])
             if event.get("alone_rule") in ALONE_RULES:
                 rec.alone_rule = event["alone_rule"]
+            if event.get("removal_kind") in REMOVAL_KINDS:
+                rec.removal_kind = event["removal_kind"]
             # A discard on objection. Additive like alone_rule, and unlike a completion_reason it
             # survives the user-stop override - a discarded meeting stays discarded however it ended.
             discarded = event.get("discarded")

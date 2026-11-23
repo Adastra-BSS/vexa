@@ -1,6 +1,6 @@
 import { Page } from "playwright";
 import { log } from "../_host";
-import { teamsRemovalIndicators, teamsRemovedByParticipantIndicators } from "./selectors";
+import { teamsPrimaryHangupButtonSelector, teamsRemovalIndicators, teamsRemovedByParticipantIndicators } from "./selectors";
 
 /** How the bot's stay ended: a participant removed it, or the call went away under it (meeting
  *  ended, connection lost). Only the first is an objection to the recording. */
@@ -21,6 +21,23 @@ export async function classifyTeamsRemoval(page: Page): Promise<TeamsRemovalKind
   if (await anyVisible(teamsRemovedByParticipantIndicators)) return "removed_by_participant";
   if (await anyVisible(teamsRemovalIndicators)) return "ended";
   return null;
+}
+
+/** What the page shows of the call, for the dead-call watch: the in-call hangup button, and whether
+ *  the page itself is gone. A call that drops under the bot shows no ending text, so only these say so. */
+export interface TeamsCallProbe {
+  hangupVisible: boolean;
+  pageClosed: boolean;
+}
+
+export async function probeTeamsCall(page: Page): Promise<TeamsCallProbe> {
+  if (page.isClosed()) return { hangupVisible: false, pageClosed: true };
+  try {
+    const hangupVisible = await page.locator(teamsPrimaryHangupButtonSelector).first().isVisible();
+    return { hangupVisible, pageClosed: false };
+  } catch {
+    return { hangupVisible: false, pageClosed: page.isClosed() };
+  }
 }
 
 // Function to check if bot has been removed from the meeting

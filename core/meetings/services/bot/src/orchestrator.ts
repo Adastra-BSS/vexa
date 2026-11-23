@@ -216,7 +216,7 @@ export function createOrchestrator(inv: Invocation, deps: OrchestratorDeps) {
   // Why the active phase ended, when the end carries more than the completion reason: which aloneness
   // rule fired, or how a removal happened. Set before signalEnd fires, read once the run has ended.
   let aloneRule: AloneRule | undefined;
-  let removalKind: 'removed_by_participant' | 'ended' | undefined;
+  let removalKind: 'removed_by_participant' | 'ended' | 'connection_lost' | undefined;
 
   // The PRE-ACTIVE abort signal (Bug 2 — the waiting-room-orphan fix): a stop/SIGTERM that arrives
   // while the bot is still `joining`/`awaiting_admission` (blocked inside `deps.join.join()`, waiting

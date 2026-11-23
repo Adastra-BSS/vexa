@@ -22,7 +22,7 @@
  * Run: npx tsx src/msteams/removal.test.ts
  */
 
-import { checkForTeamsRemoval, classifyTeamsRemoval } from './removal';
+import { checkForTeamsRemoval, classifyTeamsRemoval, probeTeamsCall } from './removal';
 import { teamsRemovalIndicators, teamsRemovedByParticipantIndicators } from './selectors';
 
 /**
@@ -119,6 +119,32 @@ const GENERIC_ALERTS = [
     teamsRemovedByParticipantIndicators.every((s) => teamsRemovalIndicators.includes(s)),
     true,
   );
+
+  console.log('\n  -- probeTeamsCall (INATTE-17: a call dropped under the bot shows no ending text) --');
+  {
+    const probe = (opts: { hangupVisible?: boolean; closed?: boolean; throws?: boolean }) => {
+      const page: any = {
+        isClosed: () => opts.closed ?? false,
+        locator: () => ({
+          first: () => ({
+            isVisible: async () => {
+              if (opts.throws) throw new Error('Target page, context or browser has been closed');
+              return opts.hangupVisible ?? false;
+            },
+          }),
+        }),
+      };
+      return probeTeamsCall(page);
+    };
+    const shown = await probe({ hangupVisible: true });
+    check('an in-call page with the hangup button -> hangupVisible, not closed', JSON.stringify(shown), JSON.stringify({ hangupVisible: true, pageClosed: false }));
+    const gone = await probe({ hangupVisible: false });
+    check('no hangup button -> not visible', JSON.stringify(gone), JSON.stringify({ hangupVisible: false, pageClosed: false }));
+    const closed = await probe({ hangupVisible: true, closed: true });
+    check('a closed page -> pageClosed, whatever the button says', JSON.stringify(closed), JSON.stringify({ hangupVisible: false, pageClosed: true }));
+    const crashed = await probe({ throws: true, closed: true });
+    check('a probe that throws on a closed page reports pageClosed, not a throw', JSON.stringify(crashed), JSON.stringify({ hangupVisible: false, pageClosed: true }));
+  }
 
   console.log(`\n  ${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exit(1);

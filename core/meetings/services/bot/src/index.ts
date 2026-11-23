@@ -59,7 +59,9 @@ import type {
   TranscriptSink,
   ActsSource,
   RecordingSink,
+  RemovalKind,
 } from './ports.js';
+import { createCallLostWatch, resolveCallLostWindowMs, startCallLostMonitor } from './call-lost.js';
 
 /** A console-only lifecycle sink — used for self-host (no `meetingApiCallbackUrl`) and as the
  *  pre-config fallback. The live HTTP sink (createHttpLifecycleSink) replaces it when a
@@ -422,9 +424,51 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     ? { probeSecondary: () => pingRedis(inv.redisUrl) }
     : undefined;
 
+  // INATTE-17: a Teams call that drops under the bot shows no ending text, so the removal monitor
+  // stays silent. The dead-call watch ends it as a removal (`connection_lost`) once the hangup
+  // button, the roster and remote audio all agree for the window.
+  const removalListeners = new Set<(kind?: RemovalKind) => void>();
+  const callLostWindowMs = resolveCallLostWindowMs(env);
+  let stopCallLost: (() => void) | undefined;
+  const joinWithCallLost: JoinDriver = {
+    ...join,
+    onRemoval(cb) {
+      removalListeners.add(cb);
+      const stop = join.onRemoval(cb);
+      return () => { removalListeners.delete(cb); stop(); };
+    },
+  };
+  if (callLostWindowMs > 0 && join.probeCall) {
+    const watch = createCallLostWatch({
+      windowMs: callLostWindowMs,
+      onLost: () => {
+        console.log(`[bot] call lost: no hangup button, empty roster and no remote audio for ${callLostWindowMs} ms`);
+        stopCallLost?.();
+        for (const cb of removalListeners) cb('connection_lost');
+      },
+    });
+    stopCallLost = startCallLostMonitor({
+      watch,
+      intervalMs: 1_000,
+      sample: async () => {
+        const probe = await join.probeCall!();
+        if (!probe) return null;
+        const snap = remoteAudioActivity.snapshot();
+        return {
+          nowMs: Date.now(),
+          hangupVisible: probe.hangupVisible,
+          pageClosed: probe.pageClosed,
+          roomEmpty: snap.roomEmpty === true,
+          lastRemoteAudioAt: snap.lastHeardAt,
+        };
+      },
+    });
+    console.log(`[bot] call-lost watch: window_ms=${callLostWindowMs}`);
+  }
+
   const orchestrator = createOrchestrator(inv, {
     lifecycle,
-    join,
+    join: joinWithCallLost,
     pipeline,
     acts,
     aloneness,

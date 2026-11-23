@@ -10,7 +10,7 @@ import {
   joinMeeting,
   AdmissionError,
   leaveGoogleMeet, leaveMicrosoftTeams, leaveZoomMeeting, leaveJitsiMeeting,
-  startGoogleRemovalMonitor, startTeamsRemovalMonitor, startZoomRemovalMonitor, startJitsiRemovalMonitor,
+  startGoogleRemovalMonitor, startTeamsRemovalMonitor, startZoomRemovalMonitor, startJitsiRemovalMonitor, probeTeamsCall,
   type JoinState, type Platform as JoinPlatform, type AdmissionOutcome,
 } from '@vexa/join';
 import type { BotStatus } from './contracts.js';
@@ -95,6 +95,7 @@ export function createBrowserJoinDriver(
       const outcome: JoinOutcome = (r.state === 'blocked' || r.state === 'needs_human_help') ? 'blocked' : 'rejected';
       return { outcome, reason: `join ended in state '${r.state}' without admission` };
     },
+    probeCall: platform === 'teams' ? async () => probeTeamsCall(page) : undefined,
     onRemoval(cb) {
       if (platform === 'teams') return startTeamsRemovalMonitor(page, cb);
       if (platform === 'zoom')  return startZoomRemovalMonitor(page, cb);
