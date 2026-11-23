@@ -12,6 +12,7 @@ decision; Attend only sets the numbers it runs with and keeps a crash backstop.
 | P6 | Admitted, and nobody has ever joined the room | 15 min | yes | `left_alone` | `nobody-joined` |
 | P8 | Active phase reached its cap | 12 h | yes | `max_bot_time_exceeded` | none |
 | P4 | The call ended under the bot (host ended it) | immediate | none | `evicted` | none, `removal_kind: ended` |
+| P4a | The call dropped under the bot with no ending text: hangup button gone, roster empty and no remote audio, for 30 s (`BOT_CALL_LOST_WINDOW_MS`, 0 disables); or the page closed | 30 s | none | `evicted` | none, `removal_kind: connection_lost` |
 | P5 | A participant removed the bot | immediate | none | `evicted` | none, `removal_kind: removed_by_participant` |
 | P9 | `attend leave` or `attend discard` in the chat | immediate | the existing reply | `stopped` (discard also sets `discarded`) | none |
 | P7 | Never admitted (lobby timeout) | 15 min | none | `awaiting_admission_timeout` | none |
@@ -68,12 +69,16 @@ first and posts its notice. The supervisor does not look at the calendar end.
 
 - `completion_reason`: as in the table.
 - `alone_rule`: `empty-room`, `nobody-joined` or `silence`. Present only when the bot left alone.
-- `removal_kind`: `ended` or `removed_by_participant`. Present only on `evicted`.
+- `removal_kind`: `ended`, `removed_by_participant` or `connection_lost`. Present only on `evicted`.
 
 Consumers match on `left_alone` for the whole family of rules. The field `alone_rule` says which rule.
 
 ## Known gaps
 
+- P4a runs on Teams only. Its signals are the hangup button and the roster, both read from the page;
+  Meet, Zoom and Jitsi keep their own removal monitors and have no dead-call watch.
+- A dead call is ended as `evicted`, not `left_alone`, so Attend must read `removal_kind` to tell it from
+  an ordinary eviction. A consumer that matches only on `evicted` still sees a removal.
 - No chat notice on Google Meet, Zoom or Jitsi, and no roster-based room rules there.
 - `invocation.automaticLeave.noOneJoinedTimeout` is carried but unused. P6 reads only
   `BOT_NOBODY_JOINED_WINDOW_MS`.

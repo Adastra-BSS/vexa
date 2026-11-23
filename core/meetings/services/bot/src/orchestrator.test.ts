@@ -681,6 +681,12 @@ async function main(): Promise<void> {
       JSON.stringify(last(removed.lc.events)));
   }
   {
+    const lost = await endsWith(({ removal }) => removal('connection_lost'));
+    check('removal: a call that dropped under the bot is evicted with removal_kind=connection_lost, no notice',
+      lost.res.completionReason === 'evicted' && last(lost.lc.events).removal_kind === 'connection_lost' && lost.order.join() === 'leave',
+      JSON.stringify(last(lost.lc.events)));
+  }
+  {
     const failingNotice = await endsWith(({ alone }) => alone('silence'), { notice: async () => { throw new Error('chat down'); } });
     check('notice: a failing notice still lets the bot leave', failingNotice.res.completionReason === 'left_alone' && failingNotice.left.length === 1,
       JSON.stringify(failingNotice.left));

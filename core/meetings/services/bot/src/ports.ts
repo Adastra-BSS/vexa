@@ -34,7 +34,13 @@ export interface JoinResult {
 
 /** Drives the platform join. The real adapter wraps @vexa/join.joinMeeting + admission
  *  watchers + the removal monitor over a @vexa/remote-browser page. */
-export type RemovalKind = 'removed_by_participant' | 'ended';
+export type RemovalKind = 'removed_by_participant' | 'ended' | 'connection_lost';
+
+/** The in-call hangup button and the page's own state, as the dead-call watch reads them. */
+export interface CallProbe {
+  hangupVisible: boolean;
+  pageClosed: boolean;
+}
 
 export interface JoinDriver {
   /** Join + await admission. `report` fires on each intermediate lifecycle state
@@ -45,6 +51,9 @@ export interface JoinDriver {
    *  stay ended where the platform can tell: a participant removed the bot, or the call went away
    *  (`ended`). Platforms that cannot tell report no kind, which is treated as `ended`. */
   onRemoval(cb: (kind?: RemovalKind) => void): () => void;
+  /** What the page shows of the call right now, for the dead-call watch (INATTE-17). Absent on
+   *  platforms that cannot report it; null when there is no page to read. */
+  probeCall?(): Promise<CallProbe | null>;
   /** Leave the meeting (best-effort; never throws fatally). */
   leave(reason: string): Promise<void>;
   /** Withdraw a PENDING join request from the waiting room / pre-join screen (Bug 2): cancel the

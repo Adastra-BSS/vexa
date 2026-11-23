@@ -365,6 +365,29 @@ def test_an_unknown_alone_rule_is_not_persisted():
     assert "alone_rule" not in final["data"]
 
 
+@pytest.mark.parametrize("kind", ["removed_by_participant", "ended", "connection_lost"])
+def test_the_removal_kind_that_evicted_the_bot_is_persisted(kind):
+    """How an evicted bot's stay ended: a participant removed it, the call ended, or the call dropped under it (INATTE-17)."""
+    terminal = {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "evicted", "removal_kind": kind,
+    }
+    conforms(terminal, "LifecycleEvent")
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, terminal)[-1]
+    assert final["data"]["completion_reason"] == "evicted"
+    assert final["data"]["removal_kind"] == kind
+
+
+def test_an_unknown_removal_kind_is_not_persisted():
+    client, app, deliveries = _client()
+    final = _drive(client, JOINING, ACTIVE, {
+        "connection_id": "sess-uid", "status": "completed", "exit_code": 0,
+        "completion_reason": "evicted", "removal_kind": "<script>",
+    })[-1]
+    assert "removal_kind" not in final["data"]
+
+
 @pytest.mark.parametrize("trigger", ["command", "removed"])
 def test_a_discard_is_persisted_on_the_meeting(trigger):
     """The bot discards on objection ("attend discard" in the chat, or a participant removing it).
