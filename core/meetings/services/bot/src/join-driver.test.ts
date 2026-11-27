@@ -7,7 +7,10 @@
  *
  * Run: tsx src/join-driver.test.ts
  */
-import { AdmissionError, AuthSessionError, TeamsJoinRedirectError, TEAMS_AUTH_REDIRECT } from '@vexa/join';
+import {
+  AdmissionError, AuthSessionError, TeamsJoinRedirectError, TEAMS_AUTH_REDIRECT,
+  TeamsPreJoinTimeoutError, TEAMS_PREJOIN_TIMEOUT,
+} from '@vexa/join';
 import { admissionOutcomeToJoinOutcome } from './join-driver.js';
 import type { JoinOutcome } from './ports.js';
 
@@ -58,6 +61,17 @@ check('TeamsJoinRedirectError is NOT an AdmissionError (driver re-raises → mes
   !(teamsRedirect instanceof AdmissionError));
 check('TeamsJoinRedirectError carries the typed reasonCode in its message',
   teamsRedirect.message.startsWith(`${TEAMS_AUTH_REDIRECT}:`));
+
+// A Teams pre-join that never rendered (INATTE-30) takes the same re-raise branch, for the same
+// reason: `teams_prejoin_timeout` has to reach the terminal event's reason text, or Attend sees a
+// nameless join_failure again.
+const prejoinTimeout = new TeamsPreJoinTimeoutError(
+  'https://teams.microsoft.com/light-meetings/launch?agent=web', 25_000,
+);
+check('TeamsPreJoinTimeoutError is NOT an AdmissionError (driver re-raises → message survives)',
+  !(prejoinTimeout instanceof AdmissionError));
+check('TeamsPreJoinTimeoutError carries the typed reasonCode in its message',
+  prejoinTimeout.message.startsWith(`${TEAMS_PREJOIN_TIMEOUT}:`));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

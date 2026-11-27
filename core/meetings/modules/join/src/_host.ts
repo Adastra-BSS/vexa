@@ -54,6 +54,7 @@ const defaultHooks: Hooks = {
 };
 let hooks: Hooks = { ...defaultHooks };
 export function setHooks(h: Partial<Hooks>): void { hooks = { ...defaultHooks, ...h }; }
+export function getHooks(): Hooks { return hooks; }
 
 // ── The exact symbols the copied files import ──────────────────────────
 export async function callJoiningCallback(_botConfig: BotConfig): Promise<void> {

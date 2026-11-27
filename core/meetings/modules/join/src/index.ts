@@ -13,6 +13,7 @@ import { prepareForRecording, leaveGoogleMeet } from "./googlemeet/leave";
 import { startGoogleRemovalMonitor } from "./googlemeet/removal";
 import { GOOGLE_MEET_CHAT_BUTTON_TIMEOUT_MS, sendGoogleMeetChatMessage, type GoogleMeetChatFailure, type GoogleMeetChatSendResult } from "./googlemeet/chat";
 import { joinMicrosoftTeams } from "./msteams/join";
+import { joinTeamsWithRetry } from "./msteams/join-retry";
 import { waitForTeamsMeetingAdmission, checkForTeamsAdmissionSilent } from "./msteams/admission";
 import { prepareForRecording as prepareForTeamsRecording, leaveMicrosoftTeams } from "./msteams/leave";
 import { probeTeamsCall, startTeamsRemovalMonitor, type TeamsCallProbe, type TeamsRemovalKind } from "./msteams/removal";
@@ -118,10 +119,7 @@ export async function joinMeeting(page: Page, opts: JoinOptions): Promise<JoinRe
 
   let admitted: boolean;
   if (platform === "teams") {
-    await joinMicrosoftTeams(page, opts.meetingUrl, botConfig.botName!, botConfig);
-    admitted = await waitForTeamsMeetingAdmission(
-      page, botConfig.automaticLeave!.waitingRoomTimeout, botConfig,
-    );
+    admitted = await joinTeamsWithRetry(page, opts.meetingUrl, botConfig);
   } else if (platform === "zoom") {
     await joinZoomMeeting(page, opts.meetingUrl, botConfig.botName!, botConfig);
     admitted = await waitForZoomMeetingAdmission(
@@ -169,5 +167,11 @@ export {
   isMicrosoftLoginUrl, isTeamsMeetingUrl,
 } from "./msteams/auth-redirect";
 export type { TeamsJoinRedirectReason } from "./msteams/auth-redirect";
+// A Teams pre-join that never rendered ends with `TeamsPreJoinTimeoutError`, by the same
+// reason-text route as the redirect above; `joinMeeting` retries it once in the same page.
+export {
+  TeamsPreJoinTimeoutError, TEAMS_PREJOIN_TIMEOUT, TEAMS_PREJOIN_READY_TIMEOUT_MS,
+} from "./msteams/prejoin-timeout";
+export { TEAMS_JOIN_MAX_ATTEMPTS } from "./msteams/join-retry";
 export { joinZoomMeeting, buildZoomWebClientUrl, waitForZoomMeetingAdmission, checkForZoomAdmissionSilent, leaveZoomMeeting, dismissZoomPopups, startZoomRemovalMonitor };
 export { joinJitsiMeeting, buildJitsiMeetingUrl, waitForJitsiMeetingAdmission, checkForJitsiAdmissionSilent, leaveJitsiMeeting, startJitsiRemovalMonitor };

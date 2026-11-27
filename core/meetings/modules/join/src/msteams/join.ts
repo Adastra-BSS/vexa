@@ -20,6 +20,7 @@ import {
   isMicrosoftLoginUrl,
   meetingOriginHost,
 } from "./auth-redirect";
+import { TeamsPreJoinTimeoutError, TEAMS_PREJOIN_READY_TIMEOUT_MS } from "./prejoin-timeout";
 
 // NOTE vs the monolith: the WebRTC remote-audio hook and the voice-agent
 // virtual-camera flow are RECORDING/HOST concerns and stay outside this brick.
@@ -60,16 +61,17 @@ async function warmUpTeamsMediaDevices(page: Page): Promise<void> {
  * before the first tick). A sign-in page is terminal on sight — waiting out the timeout there
  * buys nothing but a misleading "pre-join readiness" verdict on a page that has no pre-join.
  *
- * `requestedHost` is the host of the meeting link we were asked to open. A readiness timeout is
- * terminal when the page ended up on neither that host nor a Teams host — there is no pre-join to
- * be slow. Timing out ON one of those hosts stays advisory: a genuinely slow Teams pre-join is a
- * thing, and the later steps still get their chance at it.
+ * `requestedHost` is the host of the meeting link we were asked to open. A page that ended up on
+ * neither that host nor a Teams host is off the meeting (`TeamsJoinRedirectError`). A timeout ON
+ * one of those hosts is a stalled pre-join (`TeamsPreJoinTimeoutError`): the limit sits well past
+ * the slowest healthy pre-join measured in prod, and the steps after this one only fail slowly
+ * against an empty page, so the join stops here and the caller may open the link again.
  */
 async function waitForTeamsPreJoinReadiness(
   page: Page,
   timeoutMs: number,
   requestedHost: string | null,
-): Promise<boolean> {
+): Promise<void> {
   const start = Date.now();
   let mediaWarmupAttempted = false;
   let continueClickAttempts = 0;
@@ -127,7 +129,7 @@ async function waitForTeamsPreJoinReadiness(
 
     if (joinNowVisible || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
       log("✅ Teams pre-join controls are ready");
-      return true;
+      return;
     }
 
     const continueVisible = await page.locator(teamsContinueButtonSelectors[0]).first().isVisible().catch(() => false);
@@ -159,7 +161,7 @@ async function waitForTeamsPreJoinReadiness(
   const offMeeting = classifyNonMeetingUrl(finalUrl, requestedHost);
   if (offMeeting) throw offMeeting;
   log(`⚠️ Timed out waiting for Teams pre-join readiness after ${timeoutMs}ms (url=${finalUrl})`);
-  return false;
+  throw new TeamsPreJoinTimeoutError(finalUrl, timeoutMs);
 }
 
 export async function joinMicrosoftTeams(
@@ -199,7 +201,7 @@ export async function joinMicrosoftTeams(
   }
 
   log("Step 2.5: Waiting for Teams pre-join controls...");
-  await waitForTeamsPreJoinReadiness(page, 45000, requestedHost);
+  await waitForTeamsPreJoinReadiness(page, TEAMS_PREJOIN_READY_TIMEOUT_MS, requestedHost);
 
   // NOTE: Steps 3-5 configure the pre-join screen BEFORE clicking "Join now".
   // The pre-join screen shows camera toggle, name input, and audio settings.

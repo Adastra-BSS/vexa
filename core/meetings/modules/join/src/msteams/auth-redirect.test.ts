@@ -29,6 +29,7 @@ import {
   redactUrl,
 } from './auth-redirect';
 import { joinMicrosoftTeams } from './join';
+import { TeamsPreJoinTimeoutError } from './prejoin-timeout';
 
 // ── virtual clock: the join flow measures elapsed with Date.now() and sleeps with
 //    page.waitForTimeout(), so driving both from one counter runs 45s of waiting instantly.
@@ -200,17 +201,13 @@ const PANTOMIME = ['Step 3:', 'Step 4:', 'Step 5:', 'Step 6:', 'Step 6b:'];
     check('healthy pre-join → the flow still runs its steps', logs.some((l) => l.startsWith('Step 6:')), true);
   }
 
-  // ── 5. Negative control: a SLOW pre-join on the meeting host stays advisory ──
-  //     (no over-correction — a Teams page that is merely late is not a redirect)
+  // ── 5. Negative control: a pre-join that never renders ON the meeting host is not a redirect ──
+  //     (no over-correction — it ends as the pre-join timeout, see prejoin-timeout.test.ts)
   {
     const page = mockPage(MEETUP_JOIN_URL);
-    const { error, logs, elapsedMs } = await driveJoin(page, MEETUP_JOIN_URL);
-    check('slow pre-join ON the Teams host → no throw', error === null, true);
-    check(
-      'slow pre-join → the advisory readiness timeout still logs',
-      logs.some((l) => l.includes('pre-join readiness')), true,
-    );
-    check(`slow pre-join → the full wait is still spent: ${elapsedMs}ms`, elapsedMs > 45000, true);
+    const { error } = await driveJoin(page, MEETUP_JOIN_URL);
+    check('stalled pre-join ON the Teams host → not a TeamsJoinRedirectError', error instanceof TeamsJoinRedirectError, false);
+    check('stalled pre-join ON the Teams host → TeamsPreJoinTimeoutError', error instanceof TeamsPreJoinTimeoutError, true);
   }
 
   // ── 6. Any other non-meeting origin is terminal too, and says which ────────
@@ -223,13 +220,14 @@ const PANTOMIME = ['Step 3:', 'Step 4:', 'Step 5:', 'Step 6:', 'Step 6b:'];
     );
   }
 
-  // ── 7. An embedder-supplied host we were POINTED at stays advisory ─────────
+  // ── 7. An embedder-supplied host we were POINTED at is not a redirect ──────
   //     (a vanity/white-label Teams entry point is not a redirect — we are where we asked to be)
   {
     const vanity = 'https://meet.contoso.example/join/REDACTED';
     const page = mockPage(vanity);
     const { error } = await driveJoin(page, vanity);
-    check('still on the requested host → no throw', error === null, true);
+    check('still on the requested host → not a TeamsJoinRedirectError', error instanceof TeamsJoinRedirectError, false);
+    check('still on the requested host, pre-join stalled → TeamsPreJoinTimeoutError', error instanceof TeamsPreJoinTimeoutError, true);
   }
 
   (Date as any).now = realDateNow;
